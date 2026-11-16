@@ -56,7 +56,8 @@ targets:
       properties:
         CFBundleDisplayName: 催步
         CFBundleName: WatchStep
-        WKWatchOnly: true
+        WKWatchOnly: false
+        WKCompanionAppBundleIdentifier: top.webchangming.watchstep
         WKBackgroundModes:
           - self-care
         NSMotionUsageDescription: 读取步数，用于判断你这两天有没有走动。数据只留在手表上，不上传。
