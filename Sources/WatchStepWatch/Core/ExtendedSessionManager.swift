@@ -76,7 +76,7 @@ extension ExtendedSessionManager: WKExtendedRuntimeSessionDelegate {
     }
 
     func extendedRuntimeSession(_ extendedRuntimeSession: WKExtendedRuntimeSession,
-                                invalidWithError error: Error?) {
+                                didInvalidateWith error: (any Error)?) {
         isRunning = false
         lastEndReason = error?.localizedDescription ?? "被系统结束"
         // 连续被拒时不要死磕（会有 'too many sessions' 之类的限流），退避到 2 分钟
