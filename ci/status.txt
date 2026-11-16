@@ -1,0 +1,26 @@
+run_id=43867233978
+sha=82c015c22cd7736cc4ba2e7db192ed3327c5a8cf
+test=failure
+build=cancelled
+when=2026-11-16T12:31:14Z
+
+======== 日志尾部 ========
+== 若上面没有日志，说明 artifact 没上传（可能超时或步骤被跳过）
+
+======== 作业与步骤 ========
+JOB 逻辑测试（Linux，无需苹果账号）: completed / failure
+    - Set up job: success
+    - Initialize containers: success
+    - Run actions/checkout@v4: success
+    - swift test: failure
+    - Run actions/upload-artifact@v4: success
+    - Post Run actions/checkout@v4: success
+    - Stop containers: success
+    - Complete job: success
+JOB 编译验证（macOS，不签名）: completed / cancelled
+JOB 回报结果: in_progress / None
+    - Set up job: success
+    - Run actions/checkout@v4: success
+    - Run actions/download-artifact@v4: None
+    - 写状态并推回 ci-report 分支: None
+    - Post Run actions/checkout@v4: None
