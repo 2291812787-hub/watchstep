@@ -110,7 +110,7 @@ final class WatchEngine: ObservableObject {
             if wasNudging {
                 NotificationPlanner.shared.fireNow(
                     title: "走够了",
-                    body: "已满 \(cfg.goalSteps) 步，重新开始计时"
+                    body: "已满 \(cfg.targetSteps) 步，重新开始计时"
                 )
             }
             nudgesToday = AnchorStore.shared.nudgesToday
