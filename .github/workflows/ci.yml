@@ -9,96 +9,103 @@ permissions:
   contents: write
 
 jobs:
-  # ── 1. 逻辑测试：纯 Foundation，Linux 上秒级跑完，对应验收标准 ──
   test:
     name: 逻辑测试
     runs-on: ubuntu-latest
-    container: swift:5.9
     steps:
       - uses: actions/checkout@v4
-
       - name: swift test
-        id: t
-        shell: bash
-        run: |
-          set -o pipefail
-          swift test 2>&1 | tee /tmp/test.log
-
+        run: set -o pipefail; swift test 2>&1 | tee /tmp/test.log
       - name: 回报结果
         if: always()
-        shell: bash
+        env:
+          ST: ${{ job.status }}
         run: |
-          set -e
           mkdir -p /tmp/out
           {
             echo "job=test"
-            echo "status=${{ job.status }}"
-            echo "sha=${{ github.sha }}"
-            echo "run_id=${{ github.run_id }}"
+            echo "status=$ST"
+            echo "sha=$GITHUB_SHA"
+            echo "run_id=$GITHUB_RUN_ID"
             echo "time=$(date -u +%FT%TZ)"
             echo
             echo "======== 日志（末尾 200 行）========"
-            tail -n 200 /tmp/test.log 2>/dev/null || echo "(无日志)"
+            tail -200 /tmp/test.log 2>/dev/null
           } > /tmp/out/report.txt
           cd /tmp/out
-          git init -q
+          git init -q -b ci-test
           git config user.email ci@local
           git config user.name ci
-          git add -A
-          git commit -qm "test report ${GITHUB_RUN_ID}"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:ci-test
+          git add report.txt
+          git commit -q -m "test report $GITHUB_RUN_ID"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:ci-test
 
-  # ── 2. 无签名编译：证明 watchOS 目标真的能编出来（不需要证书）──
-  build:
-    name: 无签名编译
+  ipa:
+    name: 无签名 IPA
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: 安装 XcodeGen
         run: brew install xcodegen
-
       - name: 生成工程
         run: xcodegen generate
-
-      - name: 编译（CODE_SIGNING_ALLOWED=NO）
-        shell: bash
+      - name: 编译
         run: |
           set -o pipefail
-          xcodebuild \
+          xcodebuild build \
             -project WatchStep.xcodeproj \
-            -scheme WatchStepWatch \
-            -configuration Debug \
-            -destination 'generic/platform=watchOS' \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            build 2>&1 | tee /tmp/build.log
-
+            -scheme WatchStep \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee /tmp/build.log
+      - name: 打包未签名 IPA
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project WatchStep.xcodeproj \
+            -scheme WatchStep \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -archivePath /tmp/WatchStep.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee /tmp/archive.log
+          rm -rf /tmp/Payload && mkdir -p /tmp/Payload
+          cp -R /tmp/WatchStep.xcarchive/Products/Applications/WatchStep.app /tmp/Payload/
+          cd /tmp && zip -qry WatchStep.ipa Payload
+          ls -lh /tmp/WatchStep.ipa
+          echo "WATCH bundle:" && ls /tmp/Payload/WatchStep.app/Watch 2>/dev/null || echo "（无内嵌 Watch 目录）"
       - name: 回报结果
         if: always()
-        shell: bash
+        env:
+          ST: ${{ job.status }}
         run: |
-          set -e
           mkdir -p /tmp/out
           {
-            echo "job=build"
-            echo "status=${{ job.status }}"
-            echo "sha=${{ github.sha }}"
-            echo "run_id=${{ github.run_id }}"
+            echo "job=ipa"
+            echo "status=$ST"
+            echo "sha=$GITHUB_SHA"
+            echo "run_id=$GITHUB_RUN_ID"
             echo "time=$(date -u +%FT%TZ)"
+            echo "ipa_bytes=$(stat -f%z /tmp/WatchStep.ipa 2>/dev/null || echo 0)"
             echo
             echo "======== 所有 error 行 ========"
-            grep -n "error:" /tmp/build.log 2>/dev/null | head -60 || echo "(无 error 行)"
+            grep -h "error:" /tmp/build.log /tmp/archive.log 2>/dev/null | sort -u | head -40
+            echo "（以上为全部）"
             echo
-            echo "======== 末尾 80 行 ========"
-            tail -n 80 /tmp/build.log 2>/dev/null || echo "(无日志)"
+            echo "======== 编译日志末尾 ========"
+            tail -25 /tmp/build.log 2>/dev/null
+            echo
+            echo "======== 打包日志末尾 ========"
+            tail -15 /tmp/archive.log 2>/dev/null
           } > /tmp/out/report.txt
+          if [ -f /tmp/WatchStep.ipa ]; then
+            cp /tmp/WatchStep.ipa /tmp/out/WatchStep.ipa
+          fi
           cd /tmp/out
-          git init -q
+          git init -q -b ci-build
           git config user.email ci@local
           git config user.name ci
-          git add -A
-          git commit -qm "build report ${GITHUB_RUN_ID}"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:ci-build
+          git add report.txt WatchStep.ipa 2>/dev/null || git add report.txt
+          git commit -q -m "ipa report $GITHUB_RUN_ID"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:ci-build
