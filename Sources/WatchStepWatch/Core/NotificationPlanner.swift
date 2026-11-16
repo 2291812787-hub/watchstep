@@ -16,6 +16,11 @@ final class NotificationPlanner {
 
     private let center = UNUserNotificationCenter.current()
 
+    /// 当前排进系统的那条通知的触发时刻（本地记账，用来避免反复重排）。
+    /// 教训：tick 每 30 秒一次，如果每次都 remove + add(now + 60s)，
+    /// 那条通知就被无限推后、永远送不出去 —— 表现就是"催了五六次才冒出来一次"。
+    private var pendingFireAt: Date?
+
     func requestAuthorization() {
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in
             // 结果不用管：被拒绝时 app 内仍有震动 + 界面提示
@@ -23,8 +28,23 @@ final class NotificationPlanner {
     }
 
     /// 用一条新通知替换掉旧的。`fireAt == nil` 表示现在不该有任何待发通知。
+    ///
+    /// 关键：**触发时刻没变就什么都不做**。否则 tick 每次重排都会把
+    /// 同一条通知往后推 60 秒，系统里永远躺着一个"还有一分钟"的通知。
     func replace(fireAt: Date?, now: Date = Date(), body: String) {
+        // 排定的时刻已经过去 = 它已经发出去了（系统不会通知我们），记账清掉
+        if let prev = pendingFireAt, prev <= now { pendingFireAt = nil }
+
+        if let fire = fireAt, let prev = pendingFireAt,
+           abs(prev.timeIntervalSince(fire)) <= 2 {
+            return                      // 还是那个时刻，别动它
+        }
+        if fireAt == nil && pendingFireAt == nil {
+            return                      // 本来就没有，别白清一次
+        }
+
         center.removePendingNotificationRequests(withIdentifiers: [Self.identifier])
+        pendingFireAt = nil
         center.removeDeliveredNotifications(withIdentifiers: [Self.identifier])
 
         guard let fire = fireAt else { return }
@@ -41,7 +61,27 @@ final class NotificationPlanner {
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
         let request = UNNotificationRequest(identifier: Self.identifier, content: content, trigger: trigger)
         center.add(request, withCompletionHandler: nil)
+        pendingFireAt = fire
     }
+
+    /// 立刻弹一条（不经排程）。
+    ///
+    /// 只在 app 活着、且这一刻的数字是真的的时候用 —— 所以正文可以写准确步数。
+    /// watchOS 上这会抬腕亮屏 + 震动，和"弹窗"是同一种东西。
+    /// 用独立 id（带时间戳），否则会互相覆盖（同 id 新通知会顶掉旧的、旧的还留在通知中心）。
+    func fireNow(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        let id = "ws.now.\(Int(Date().timeIntervalSince1970))"
+        let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
+        center.add(request, withCompletionHandler: nil)
+    }
+
+    /// 自检用：现在有没有一条在等
+    var nextFireAt: Date? { pendingFireAt }
 
     func cancelAll() {
         center.removePendingNotificationRequests(withIdentifiers: [Self.identifier])

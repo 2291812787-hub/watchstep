@@ -115,7 +115,7 @@ final class WatchEngine: ObservableObject {
             let last = AnchorStore.shared.lastNudgeAt
             let canNudge = last == nil || now.timeIntervalSince(last!) >= cfg.tick
             if canNudge {
-                fireNudgeHaptic()
+                fireNudge(steps: steps, anchor: anchor, now: now, cfg: cfg)
                 AnchorStore.shared.lastNudgeAt = now
                 AnchorStore.shared.nudgesToday += 1
             }
@@ -128,18 +128,27 @@ final class WatchEngine: ObservableObject {
         }
     }
 
-    /// 催命震动。第 1 次提醒，之后升级力度。
-    private func fireNudgeHaptic() {
+    /// 催命：震动 + 一条立即投递的通知。
+    /// 只有震动的话，抬腕什么也看不到，用户根本不知道刚才震的是谁。
+    private func fireNudge(steps: Int, anchor: Date, now: Date, cfg: Config) {
         let count = AnchorStore.shared.nudgesToday
-        let device = WKInterfaceDevice.current()
-        if count == 0 {
-            device.play(.notification)
-        } else if count < 3 {
-            device.play(.retry)
-        } else {
-            device.play(.failure)
-            device.play(.notification)
+        // 每次给一串触感，间隔 0.7 秒。连着调用会被系统合并成一下，
+        // 必须错开时间，才不会被误认为错觉或系统提示。
+        let seq: [WKHapticType] = count < 3
+            ? [.notification, .retry]
+            : [.failure, .retry, .notification]
+        for (i, h) in seq.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7 * Double(i)) {
+                WKInterfaceDevice.current().play(h)
+            }
         }
+
+        let remain = max(0, cfg.targetSteps - steps)
+        let sitting = Int(now.timeIntervalSince(anchor) / 60)
+        NotificationPlanner.shared.fireNow(
+            title: "该走了",
+            body: "还差 \(remain) 步 · 已坐 \(sitting) 分钟"
+        )
     }
 
     // MARK: - 通知对账（关键）
@@ -162,10 +171,16 @@ final class WatchEngine: ObservableObject {
         let deadline = RuleEngine.deadline(anchor: anchor, config: cfg)
         let nextCheck = now.addingTimeInterval(cfg.tick)
 
+        // 已在催命期：只在没有更早的兜底通知时才排一条，
+        // 时刻固定为"上次催命 + 2 个节拍"，避免每 30 秒被 tick 往后推一次。
         let fire: Date
         if now >= deadline {
-            // 已在催命期：下一次检查点就要有动静
-            fire = nextCheck
+            if let p = NotificationPlanner.shared.nextFireAt, p > now {
+                fire = p
+            } else {
+                let base = AnchorStore.shared.lastNudgeAt ?? now
+                fire = base.addingTimeInterval(cfg.tick * 2)
+            }
         } else {
             // 窗口未满：排在窗口到期那一刻
             fire = deadline
