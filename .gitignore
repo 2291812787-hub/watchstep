@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.ipa
+*.xcarchive
+.DS_Store
+test.log
+build.log

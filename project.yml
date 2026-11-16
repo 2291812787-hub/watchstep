@@ -1,0 +1,62 @@
+# XcodeGen 工程描述 —— 不需要 Mac，CI 上自动生成 .xcodeproj
+# 关键：默认配置**不要求任何付费能力**（无 Push、无 HealthKit、无 App Groups），
+# 所以可以用免费 Apple ID + iLoader 自签，7 天重刷一次即可。
+name: WatchStep
+
+options:
+  bundleIdPrefix: top.webchangming
+  deploymentTarget:
+    iOS: "16.0"
+    watchOS: "9.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    # 自签路线：手动签名，不自动要描述文件
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_IDENTITY: ""
+
+targets:
+  # ---------- iOS 壳：只是容器 ----------
+  WatchStep:
+    type: application
+    platform: iOS
+    sources:
+      - Sources/WatchStep
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.webchangming.watchstep
+        INFOPLIST_KEY_CFBundleDisplayName: 催步
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        CODE_SIGNING_ALLOWED: NO
+    dependencies:
+      - target: WatchStepWatch
+        embed: true
+
+  # ---------- watchOS 独立 App：真正的全部逻辑 ----------
+  WatchStepWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - path: Sources/WatchStepWatch
+        excludes:
+          - "Info.plist"
+      - path: Sources/WatchStepCore
+    info:
+      path: Sources/WatchStepWatch/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.webchangming.watchstep.watchkitapp
+        COMPANION_BUNDLE_ID: top.webchangming.watchstep
+        SKIP_INSTALL: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        CODE_SIGNING_ALLOWED: NO
+        SWIFT_OBJC_BRIDGING_HEADER: ""

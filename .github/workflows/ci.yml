@@ -1,0 +1,62 @@
+name: CI
+
+# 两条流水线：
+#   1) test  —— 在 Linux 上跑纯逻辑测试（状态机、验收标准）。不需要苹果账号、不花钱、秒级。
+#   2) build —— 在 macOS runner 上生成工程 + 无签名编译验证。
+#               CODE_SIGNING_ALLOWED=NO，所以不需要任何证书。
+# 出包/安装交给长明上的 iLoader（免费 Apple ID 自签，7 天重刷）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 逻辑测试（Linux，无需苹果账号）
+    runs-on: ubuntu-latest
+    container: swift:5.9
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift test
+        run: swift test 2>&1 | tee test.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-log
+          path: test.log
+
+  build:
+    name: 编译验证（macOS，不签名）
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成工程
+        run: xcodegen generate
+
+      - name: 编译 iOS 壳 + watchOS app（不签名）
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project WatchStep.xcodeproj \
+            -scheme WatchStep \
+            -configuration Debug \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: build.log
