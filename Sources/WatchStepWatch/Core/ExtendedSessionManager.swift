@@ -75,10 +75,13 @@ extension ExtendedSessionManager: WKExtendedRuntimeSessionDelegate {
         scheduleRestart(after: 5)
     }
 
-    func extendedRuntimeSession(_ extendedRuntimeSession: WKExtendedRuntimeSession,
-                                didInvalidateWith error: (any Error)?) {
+    func extendedRuntimeSession(
+        _ extendedRuntimeSession: WKExtendedRuntimeSession,
+        didInvalidateWith reason: WKExtendedRuntimeSessionInvalidationReason,
+        error: (any Error)?
+    ) {
         isRunning = false
-        lastEndReason = error?.localizedDescription ?? "被系统结束"
+        lastEndReason = error?.localizedDescription ?? "被系统结束(reason \(reason.rawValue))"
         // 连续被拒时不要死磕（会有 'too many sessions' 之类的限流），退避到 2 分钟
         let backoff: TimeInterval = segmentsStarted > 6 ? 120 : 15
         scheduleRestart(after: backoff)
