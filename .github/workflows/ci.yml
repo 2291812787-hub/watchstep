@@ -103,6 +103,6 @@ jobs:
           } > ci/status.txt
           git config user.email "ci@watchstep.local"
           git config user.name "ci"
-          git add -A ci
+          git add -A
           git diff --cached --quiet && echo "无变化" || git commit -m "ci report ${{ github.run_id }}"
           git push origin HEAD:ci-report --force
