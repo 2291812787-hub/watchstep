@@ -105,6 +105,14 @@ final class WatchEngine: ObservableObject {
             if wasNudging || cfg.confirmHapticOnReset {
                 WKInterfaceDevice.current().play(.success)
             }
+            // 「达成」也要有可见的反馈。否则用户只感到一震、屏幕上什么都没有，
+            // 分不清是走够了还是又催一次。只在真的催过之后才提示，避免干扰。
+            if wasNudging {
+                NotificationPlanner.shared.fireNow(
+                    title: "走够了",
+                    body: "已满 \(cfg.goalSteps) 步，重新开始计时"
+                )
+            }
             nudgesToday = AnchorStore.shared.nudgesToday
 
         case .nudge:
