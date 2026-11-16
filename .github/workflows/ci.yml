@@ -1,9 +1,10 @@
 name: CI
 
-# 两条流水线：
-#   1) test  —— 在 Linux 上跑纯逻辑测试（状态机、验收标准）。不需要苹果账号、不花钱、秒级。
-#   2) build —— 在 macOS runner 上生成工程 + 无签名编译验证。
-#               CODE_SIGNING_ALLOWED=NO，所以不需要任何证书。
+# 三条流水线：
+#   1) test  —— Linux 上跑纯逻辑测试（单锚点状态机、验收标准）。不需要苹果账号。
+#   2) build —— macOS runner 上生成工程 + 无签名编译验证。CODE_SIGNING_ALLOWED=NO。
+#   3) report —— 把结果写进 ci-report 分支，供外部（沙盒里的我）用部署密钥读回。
+#               因为私有仓库的 Actions 状态需要 token，写回仓库就不用给 token。
 # 出包/安装交给长明上的 iLoader（免费 Apple ID 自签，7 天重刷）。
 
 on:
@@ -21,12 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: swift test
-        run: swift test 2>&1 | tee test.log
+        run: swift test 2>&1 | tee /tmp/test.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test-log
-          path: test.log
+          path: /tmp/test.log
 
   build:
     name: 编译验证（macOS，不签名）
@@ -53,10 +54,49 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            2>&1 | tee build.log
+            2>&1 | tee /tmp/build.log
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: build-log
-          path: build.log
+          path: /tmp/build.log
+
+  report:
+    name: 回报结果
+    needs: [test, build]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: logs
+        continue-on-error: true
+
+      - name: 写状态并推回 ci-report 分支
+        run: |
+          set -x
+          mkdir -p ci
+          {
+            echo "run_id=${{ github.run_id }}"
+            echo "sha=${{ github.sha }}"
+            echo "test=${{ needs.test.result }}"
+            echo "build=${{ needs.build.result }}"
+            echo "when=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            echo "======== 日志尾部 ========"
+            for f in $(find logs -type f 2>/dev/null); do
+              echo "---------- $f"
+              tail -n 120 "$f"
+            done
+            echo "== 若上面没有日志，说明 artifact 没上传（可能超时或步骤被跳过）"
+          } > ci/status.txt
+          git config user.email "ci@watchstep.local"
+          git config user.name "ci"
+          git add -A ci
+          git diff --cached --quiet && echo "无变化" || git commit -m "ci report ${{ github.run_id }}"
+          git push origin HEAD:ci-report --force
