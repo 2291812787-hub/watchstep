@@ -75,6 +75,9 @@ jobs:
           cd /tmp && zip -qry WatchStep.ipa Payload
           ls -lh /tmp/WatchStep.ipa
           echo "WATCH bundle:" && ls /tmp/Payload/WatchStep.app/Watch 2>/dev/null || echo "（无内嵌 Watch 目录）"
+          echo "=== 手表 Info.plist 关键键 ==="
+          plutil -p /tmp/Payload/WatchStep.app/Watch/WatchStepWatch.app/Info.plist \
+            | grep -E "WKWatchOnly|WKBackgroundModes|NSMotion|CFBundleDisplayName|MinimumOSVersion|UIDeviceFamily" || echo "（缺键！）"
       - name: 回报结果
         if: always()
         env:

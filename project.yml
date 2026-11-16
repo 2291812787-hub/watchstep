@@ -34,6 +34,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: 催步
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
@@ -53,6 +54,15 @@ targets:
       - path: Sources/WatchStepCore
     info:
       path: Sources/WatchStepWatch/Info.plist
+      properties:
+        CFBundleDisplayName: 催步
+        CFBundleName: WatchStep
+        WKWatchOnly: true
+        WKBackgroundModes:
+          - self-care
+        NSMotionUsageDescription: 读取步数，用于判断你这两天有没有走动。数据只留在手表上，不上传。
+        UIDeviceFamily:
+          - 4
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: top.webchangming.watchstep.watchkitapp
