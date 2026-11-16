@@ -87,7 +87,7 @@ final class WatchEngine: ObservableObject {
         lastError = ""
 
         guard let steps = steps else {
-            lastDecision = stepCountingAvailable ? .unknown : .unknown
+            lastDecision = .unknown
             lastError = stepCountingAvailable ? "读不到步数（运动权限？）" : "这台设备不支持计步"
             // 读不到时也要把通知排上，否则会完全静默失效
             return

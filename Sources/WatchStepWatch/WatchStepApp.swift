@@ -48,16 +48,3 @@ final class AppDelegate: NSObject, WKApplicationDelegate {
     }
 }
 
-/// 后台刷新排期。
-struct WatchBackgroundScheduler {
-    static let shared = WatchBackgroundScheduler()
-
-    func reschedule(interval: TimeInterval = 15 * 60) {
-        // 系统只把时间当"偏好"，受复杂功能预算限制（约 4 次/小时）。
-        // 所以这里只是额外的一双眼睛，主引擎是前台 tick，兜底是预排通知。
-        WKApplication.shared().scheduleBackgroundRefresh(
-            withPreferredDate: Date().addingTimeInterval(interval),
-            userInfo: nil
-        ) { _ in }
-    }
-}
