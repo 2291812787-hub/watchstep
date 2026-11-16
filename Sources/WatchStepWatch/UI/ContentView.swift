@@ -5,9 +5,6 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showSelfCheck = false
 
-    // 每秒刷新，只为把倒计时数字变活；这是界面，不是状态源
-    @State private var now = Date()
-
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             main(context.date)
@@ -18,11 +15,12 @@ struct ContentView: View {
 
     @ViewBuilder
     private func main(_ date: Date) -> some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 5) {
             statusBadge(date)
             bigNumber(date)
+            stepRow()
             Text(detail(date))
-                .font(.system(size: 12))
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
@@ -40,13 +38,16 @@ struct ContentView: View {
                     Image(systemName: "slider.horizontal.3")
                 }
                 .buttonStyle(.bordered)
-            }
-            .padding(.top, 2)
 
-            Button("自检") { showSelfCheck = true; engine.runSelfCheck() }
-                .font(.system(size: 11))
-                .buttonStyle(.plain)
-                .foregroundStyle(.blue)
+                Button {
+                    showSelfCheck = true
+                    engine.runSelfCheck()
+                } label: {
+                    Image(systemName: "checklist")
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(.top, 1)
         }
         .padding(.horizontal, 4)
     }
@@ -68,7 +69,7 @@ struct ContentView: View {
             .foregroundStyle(color)
     }
 
-    // MARK: - 主数字
+    // MARK: - 主数字（倒计时）
 
     /// 只在"该动了"之后才显示活秒数 —— 此时压迫感才是重点。
     /// 平时显示"距该提醒还有 X 分钟"，由锚点现算，不会跑偏。
@@ -77,12 +78,12 @@ struct ContentView: View {
         if remaining <= 0 {
             let over = Int(-remaining)
             return Text(timerText(over))
-                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .font(.system(size: 30, weight: .bold, design: .rounded))
                 .foregroundStyle(.red)
         } else {
             let mins = Int(ceil(remaining / 60))
             return Text("\(mins)")
-                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .font(.system(size: 30, weight: .bold, design: .rounded))
                 .foregroundStyle(engine.level(at: date) == .soon ? .yellow : .white)
         }
     }
@@ -93,6 +94,28 @@ struct ContentView: View {
         return String(format: "+%d:%02d", m, s)
     }
 
+    // MARK: - 本轮步数（一直显示，不让主界面只剩一个孤零零的数字）
+
+    @ViewBuilder
+    private func stepRow() -> some View {
+        let target = max(1, engine.config.targetSteps)
+        let cur = engine.stepsInWindow
+        let reached = cur >= target
+        VStack(spacing: 2) {
+            HStack(spacing: 4) {
+                Image(systemName: "figure.walk")
+                    .font(.system(size: 11))
+                    .foregroundStyle(reached ? .green : .secondary)
+                Text("\(cur) / \(target) 步")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(reached ? .green : .primary)
+            }
+            ProgressView(value: Double(min(cur, target)), total: Double(target))
+                .progressViewStyle(.linear)
+                .tint(reached ? .green : .blue)
+        }
+    }
+
     private func detail(_ date: Date) -> String {
         if case .unknown = engine.lastDecision {
             return engine.lastError.isEmpty ? "读不到步数" : engine.lastError
@@ -101,11 +124,9 @@ struct ContentView: View {
         if !engine.config.isActive(at: date) {
             return "生效时段 \(engine.config.startHour):00–\(engine.config.endHour):00"
         }
-        let target = engine.config.targetSteps
-        let cur = engine.stepsInWindow
         if engine.level(at: date) == .overdue {
-            return "本轮 \(cur)/\(target) 步 · 每 \(engine.config.tickMinutes) 分钟催一次"
+            return "每 \(engine.config.tickMinutes) 分钟催一次"
         }
-        return "本轮 \(cur)/\(target) 步"
+        return "\(engine.config.windowMinutes) 分钟一轮，走够就归零"
     }
 }
