@@ -1,5 +1,6 @@
 import SwiftUI
 import WatchKit
+import UserNotifications
 
 @main
 struct WatchStepApp: App {
@@ -15,10 +16,29 @@ struct WatchStepApp: App {
     }
 }
 
+/// App 在前台（用户正抬腕看着界面）时，系统默认不显示横幅。
+/// 这样"只有一下震动、抬腕什么都没有"就发生了 —— 所以必须接管一次。
+final class NudgePresenter: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = NudgePresenter()
+
+    func install() {
+        UNUserNotificationCenter.current().delegate = self
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+}
+
 /// 后台唤醒都从这里进 —— 这是"app 被系统叫醒"的唯一统一入口。
 final class AppDelegate: NSObject, WKApplicationDelegate {
 
     func applicationDidFinishLaunching() {
+        NudgePresenter.shared.install()
         WatchEngine.shared.boot()
     }
 
