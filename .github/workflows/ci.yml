@@ -89,8 +89,11 @@ jobs:
             echo "run_id=${{ github.run_id }}"
             echo "time=$(date -u +%FT%TZ)"
             echo
-            echo "======== 日志（末尾 300 行）========"
-            tail -n 300 /tmp/build.log 2>/dev/null || echo "(无日志)"
+            echo "======== 所有 error 行 ========"
+            grep -n "error:" /tmp/build.log 2>/dev/null | head -60 || echo "(无 error 行)"
+            echo
+            echo "======== 末尾 80 行 ========"
+            tail -n 80 /tmp/build.log 2>/dev/null || echo "(无日志)"
           } > /tmp/out/report.txt
           cd /tmp/out
           git init -q
