@@ -1,38 +1,54 @@
-name: CI
-
-# 三条流水线：
-#   1) test  —— Linux 上跑纯逻辑测试（单锚点状态机、验收标准）。不需要苹果账号。
-#   2) build —— macOS runner 上生成工程 + 无签名编译验证。CODE_SIGNING_ALLOWED=NO。
-#   3) report —— 把结果写进 ci-report 分支，供外部（沙盒里的我）用部署密钥读回。
-#               因为私有仓库的 Actions 状态需要 token，写回仓库就不用给 token。
-# 出包/安装交给长明上的 iLoader（免费 Apple ID 自签，7 天重刷）。
+name: build
 
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 jobs:
+  # ── 1. 逻辑测试：纯 Foundation，Linux 上秒级跑完，对应验收标准 ──
   test:
-    name: 逻辑测试（Linux，无需苹果账号）
+    name: 逻辑测试
     runs-on: ubuntu-latest
     container: swift:5.9
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: swift test
-        run: set -o pipefail; swift test 2>&1 | tee /tmp/test.log
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-log
-          path: /tmp/test.log
 
+      - name: swift test
+        id: t
+        shell: bash
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee /tmp/test.log
+
+      - name: 回报结果
+        if: always()
+        shell: bash
+        run: |
+          set -e
+          mkdir -p /tmp/out
+          {
+            echo "job=test"
+            echo "status=${{ job.status }}"
+            echo "sha=${{ github.sha }}"
+            echo "run_id=${{ github.run_id }}"
+            echo "time=$(date -u +%FT%TZ)"
+            echo
+            echo "======== 日志（末尾 200 行）========"
+            tail -n 200 /tmp/test.log 2>/dev/null || echo "(无日志)"
+          } > /tmp/out/report.txt
+          cd /tmp/out
+          git init -q
+          git config user.email ci@local
+          git config user.name ci
+          git add -A
+          git commit -qm "test report ${GITHUB_RUN_ID}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:ci-test
+
+  # ── 2. 无签名编译：证明 watchOS 目标真的能编出来（不需要证书）──
   build:
-    name: 编译验证（macOS，不签名）
+    name: 无签名编译
     runs-on: macos-14
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -42,67 +58,41 @@ jobs:
       - name: 生成工程
         run: xcodegen generate
 
-      - name: 编译 iOS 壳 + watchOS app（不签名）
+      - name: 编译（CODE_SIGNING_ALLOWED=NO）
+        shell: bash
         run: |
           set -o pipefail
-          xcodebuild build \
+          xcodebuild \
             -project WatchStep.xcodeproj \
-            -scheme WatchStep \
+            -scheme WatchStepWatch \
             -configuration Debug \
-            -destination "generic/platform=iOS" \
-            -derivedDataPath "$RUNNER_TEMP/dd" \
+            -destination 'generic/platform=watchOS' \
+            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            2>&1 | tee /tmp/build.log
+            CODE_SIGNING_REQUIRED=NO \
+            build 2>&1 | tee /tmp/build.log
 
-      - uses: actions/upload-artifact@v4
+      - name: 回报结果
         if: always()
-        with:
-          name: build-log
-          path: /tmp/build.log
-
-  report:
-    name: 回报结果
-    needs: [test, build]
-    if: always()
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: logs
-        continue-on-error: true
-
-      - name: 写状态并推回 ci-report 分支
+        shell: bash
         run: |
-          set -x
-          mkdir -p ci
+          set -e
+          mkdir -p /tmp/out
           {
-            echo "run_id=${{ github.run_id }}"
+            echo "job=build"
+            echo "status=${{ job.status }}"
             echo "sha=${{ github.sha }}"
-            echo "test=${{ needs.test.result }}"
-            echo "build=${{ needs.build.result }}"
-            echo "when=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "run_id=${{ github.run_id }}"
+            echo "time=$(date -u +%FT%TZ)"
             echo
-            echo "======== 日志尾部 ========"
-            for f in $(find logs -type f 2>/dev/null); do
-              echo "---------- $f"
-              tail -n 120 "$f"
-            done
-            echo "== 若上面没有日志，说明 artifact 没上传（可能超时或步骤被跳过）"
-            echo
-            echo "======== 作业与步骤 ========"
-            curl -sS -H "Authorization: Bearer ${{ github.token }}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); [print('JOB %s: %s / %s' % (j['name'], j.get('status'), j.get('conclusion'))) or [print('    - %s: %s' % (s['name'], s.get('conclusion'))) for s in j.get('steps', [])] for j in d.get('jobs', [])]"
-          } > ci/status.txt
-          git config user.email "ci@watchstep.local"
-          git config user.name "ci"
+            echo "======== 日志（末尾 300 行）========"
+            tail -n 300 /tmp/build.log 2>/dev/null || echo "(无日志)"
+          } > /tmp/out/report.txt
+          cd /tmp/out
+          git init -q
+          git config user.email ci@local
+          git config user.name ci
           git add -A
-          git diff --cached --quiet && echo "无变化" || git commit -m "ci report ${{ github.run_id }}"
-          git push origin HEAD:ci-report --force
+          git commit -qm "build report ${GITHUB_RUN_ID}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:ci-build
