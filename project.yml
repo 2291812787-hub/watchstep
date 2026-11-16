@@ -56,6 +56,11 @@ targets:
       properties:
         CFBundleDisplayName: 催步
         CFBundleName: WatchStep
+        # SwiftUI 单 target watchOS app（无 WatchKit Extension）必须声明 WKApplication=true，
+        # 否则 installd 报 InvalidWatchKitApp 拒绝安装（"does not have a WKWatchKitApp or
+        # WKApplication key set to true in its Info.plist"）。
+        # 传统 WatchKit 2.0 app（带 WatchKit Extension）才用 WKWatchKitApp=true。
+        WKApplication: true
         WKWatchOnly: false
         WKCompanionAppBundleIdentifier: top.webchangming.watchstep
         WKBackgroundModes:
