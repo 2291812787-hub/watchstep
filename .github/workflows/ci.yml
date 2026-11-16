@@ -51,7 +51,7 @@ jobs:
   # ── 2. 无签名编译：证明 watchOS 目标真的能编出来（不需要证书）──
   build:
     name: 无签名编译
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
