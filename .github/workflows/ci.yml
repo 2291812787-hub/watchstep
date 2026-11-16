@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   # ── 1. 逻辑测试：纯 Foundation，Linux 上秒级跑完，对应验收标准 ──
   test:
