@@ -7,7 +7,7 @@ options:
   bundleIdPrefix: top.webchangming
   deploymentTarget:
     iOS: "16.0"
-    watchOS: "9.0"
+    watchOS: "8.0"
   createIntermediateGroups: true
   groupSortPosition: top
 
@@ -33,7 +33,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: top.webchangming.watchstep
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: 催步
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         TARGETED_DEVICE_FAMILY: "1"
