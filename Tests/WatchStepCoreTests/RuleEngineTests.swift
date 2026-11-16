@@ -141,28 +141,27 @@ final class RuleEngineTests: XCTestCase {
 
     // MARK: - 全流程模拟（一轮完整闭环）
 
-    /// 模拟一分钟一分钟地走：前 12 分钟静坐，第 13 分钟起每分钟 25 步。
-    /// 预期：第 30 分钟进入该催；第 38 分钟累计满 200 步 → 归零，之后不再该催。
+    /// 模拟：前 12 分钟完全静坐，第 13 分钟起每分钟走 8 步（走得很慢，凑不够 200）。
+    /// 预期：第 30 分钟进入该催（累计 144 步）；第 37 分钟累计满 200 → 归零，之后不再该催。
     func testFullCycleSimulation() {
         var anchor = date(hour: 14, minute: 0)
         var nudgeMinute: Int?
         var resetMinute: Int?
-        var cumSteps = 0
+        var nudgeCount = 0
 
         for m in 0...120 {
-            let now = anchor.addingTimeInterval(0).addingTimeInterval(TimeInterval(m * 60))
-            // 重新以真实 anchor 计算步数
+            let now = anchor.addingTimeInterval(TimeInterval(m * 60))
             let elapsed = Int(now.timeIntervalSince(anchor) / 60)
-            cumSteps = elapsed <= 12 ? 0 : (elapsed - 12) * 25
+            let cumSteps = elapsed <= 12 ? 0 : (elapsed - 12) * 8
 
             let d = RuleEngine.decide(anchor: anchor, steps: cumSteps, now: now, config: cfg)
             switch d {
             case .nudge:
                 if nudgeMinute == nil { nudgeMinute = m }
+                nudgeCount += 1
             case .satisfied:
                 if resetMinute == nil { resetMinute = m }
                 anchor = now
-                cumSteps = 0
             default:
                 break
             }
@@ -170,7 +169,22 @@ final class RuleEngineTests: XCTestCase {
         }
 
         XCTAssertEqual(nudgeMinute, 30, "第 30 分钟应开始催")
-        XCTAssertNotNil(resetMinute, "走够之后必须归零")
-        XCTAssertGreaterThan(resetMinute ?? 0, 30)
+        XCTAssertEqual(nudgeCount, 7, "第 30~36 分钟共催 7 次，一次都不许吞")
+        XCTAssertEqual(resetMinute, 37, "累计满 200 步那一刻必须归零")
+    }
+
+    /// 全静坐一小时：每一分钟都必须判该催，不许出现"催一次就沉默"。
+    func testNeverSilentlyStopsNudging() {
+        let anchor = date(hour: 14, minute: 0)
+        var silentAfterNudge = false
+        var hasNudged = false
+        for m in 0...60 {
+            let now = anchor.addingTimeInterval(TimeInterval(m * 60))
+            let d = RuleEngine.decide(anchor: anchor, steps: 0, now: now, config: cfg)
+            if d == .nudge { hasNudged = true }
+            if hasNudged && d == .waiting { silentAfterNudge = true }
+        }
+        XCTAssertTrue(hasNudged)
+        XCTAssertFalse(silentAfterNudge, "开始催之后不许退回静默")
     }
 }
