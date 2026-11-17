@@ -554,6 +554,12 @@ final class WatchEngine: ObservableObject {
             // 3. 通知授权
             NotificationPlanner.shared.authorizationStatus { s in
                 lines.append(s == "已允许" ? "✓ 通知权限已允许" : "✗ 通知权限：\(s)（会没声音）")
+                let style = NotificationPlanner.shared.lastStyleReport
+                if style.isEmpty {
+                    lines.append("· 样式读取中，再点一次「重新自检」")
+                } else {
+                    lines.append(style)
+                }
 
                 // 4. 计步
                 lines.append(self.stepCountingAvailable ? "✓ 计步可用" : "✗ 设备不支持计步")

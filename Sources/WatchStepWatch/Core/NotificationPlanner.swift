@@ -179,7 +179,8 @@ final class NotificationPlanner {
         }
     }
 
-    /// 链里各条的触发时刻，给自检页直接看「系统里到底排着几点」。
+    /// 最近一次读到的提醒样式明细，自检页直接显示这一行。
+    var lastStyleReport: String = ""
     var plannedFires: [Date] { chain.map { $0.fireAt } }
 
     func pendingCount(_ completion: @escaping (Int) -> Void) {
@@ -189,6 +190,9 @@ final class NotificationPlanner {
         }
     }
 
+    /// 不只看「授权了没有」，还要看**提醒样式**是不是被设成了静默投递。
+    /// 权限「已允许」但 alertSetting/soundSetting 是 disabled 时，系统照样收下通知、
+    /// 照样算进待发条数，只是不响不震、悄悄塞进通知中心 —— 看起来就像「后台死了」。
     func authorizationStatus(_ completion: @escaping (String) -> Void) {
         center.getNotificationSettings { settings in
             let s: String
@@ -200,7 +204,26 @@ final class NotificationPlanner {
             case .ephemeral: s = "临时"
             @unknown default: s = "未知"
             }
-            DispatchQueue.main.async { completion(s) }
+            func flag(_ v: UNNotificationSetting) -> String {
+                switch v {
+                case .enabled: return "开"
+                case .disabled: return "**关**"
+                case .notSupported: return "不支持"
+                @unknown default: return "?"
+                }
+            }
+            let style: String
+            switch settings.alertStyle {
+            case .banner: style = "横幅"
+            case .alert: style = "提醒"
+            case .none: style = "**无**"
+            @unknown default: style = "?"
+            }
+            let detail = "· 样式 \(style) 声音 \(flag(settings.soundSetting)) 横幅 \(flag(settings.alertSetting)) 通知中心 \(flag(settings.notificationCenterSetting))"
+            DispatchQueue.main.async {
+                completion(s)
+                self.lastStyleReport = detail
+            }
         }
     }
 }
