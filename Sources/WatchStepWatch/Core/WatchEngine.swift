@@ -588,7 +588,7 @@ final class WatchEngine: ObservableObject {
                 // 会话一断，就只能等用户点进来才知道已经走够。
                 let ext = ExtendedSessionManager.shared
                 if ext.isRunning {
-                    lines.append("✓ 常驻会话在跑（第 \(ext.segmentsStarted) 段）")
+                    lines.append("✓ 常驻会话在跑（第 \(ext.segmentsStarted) 段，还能 \(ext.minutesLeftEstimate) 分钟）")
                 } else {
                     let why = ext.lastEndReason.isEmpty ? "没启动" : ext.lastEndReason
                     lines.append("✗ 常驻会话没在跑：\(why)")

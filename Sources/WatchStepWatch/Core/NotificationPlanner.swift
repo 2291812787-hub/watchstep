@@ -104,8 +104,6 @@ final class NotificationPlanner {
             content.title = Self.title
             content.body = body
             content.sound = .default
-            // 同一组，便于系统合并展示；也方便将来整体清掉
-            content.threadIdentifier = "watchstep.nudge.live"
 
             let trigger = UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
             requests.append(UNNotificationRequest(identifier: Self.id(i),
@@ -131,7 +129,6 @@ final class NotificationPlanner {
         content.title = title
         content.body = body
         content.sound = .default
-        content.threadIdentifier = "watchstep.nudge.live"
 
         let request = UNNotificationRequest(identifier: Self.id(0), content: content, trigger: nil)
         center.add(request, withCompletionHandler: nil)
@@ -180,5 +177,29 @@ final class NotificationPlanner {
             }
             DispatchQueue.main.async { completion(s) }
         }
+    }
+
+    // MARK: - 续期提醒
+
+    /// 会话到期就没人能震了。到期前必须先吭一声，否则用户只会觉得"又死了"。
+    /// 这条不走 chain：它和催步无关，标识独立，不会被后续对账清掉。
+    private static let renewId = "watchstep.renew"
+
+    func scheduleRenewReminder(after seconds: TimeInterval, minutesLeft: Int) {
+        center.removePendingNotificationRequests(withIdentifiers: [Self.renewId])
+
+        let content = UNMutableNotificationContent()
+        content.title = "催步快停了"
+        content.body = "后台还能再撑 10 分钟。点我一下，接着催。"
+        content.sound = .default
+        content.interruptionLevel = .timeSensitive
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(60, seconds), repeats: false)
+        let request = UNNotificationRequest(identifier: Self.renewId, content: content, trigger: trigger)
+        center.add(request, withCompletionHandler: nil)
+    }
+
+    func cancelRenewReminder() {
+        center.removePendingNotificationRequests(withIdentifiers: [Self.renewId])
     }
 }

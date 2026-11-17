@@ -16,6 +16,16 @@ final class ExtendedSessionManager: NSObject, ObservableObject {
 
     @Published private(set) var isRunning = false
     @Published private(set) var lastEndReason: String = ""
+
+    /// 本段会话开始时刻。self-care 会话上限 1 小时，用来看还剩多少。
+    private var segmentStartedAt: Date?
+
+    /// 估算本段会话还能跑多少分钟。0 表示已经到期或没在跑。
+    var minutesLeftEstimate: Int {
+        guard isRunning, let s = segmentStartedAt else { return 0 }
+        let left = 60 - Int(Date().timeIntervalSince(s) / 60)
+        return max(0, left)
+    }
     @Published private(set) var segmentsStarted: Int = 0
 
     private var session: WKExtendedRuntimeSession?
@@ -95,6 +105,11 @@ extension ExtendedSessionManager: WKExtendedRuntimeSessionDelegate {
         consecutiveFailures = 0
         segmentsStarted += 1
         lastEndReason = ""
+        startedAt = Date()
+        segmentStartedAt = Date()
+        // 会话上限约 1 小时，且 Apple 只允许在前台启动它 —— 到期后自己回不来。
+        // 提前 10 分钟吭一声，用户点一下就能续上；不吭声就等于"悄悄死掉"。
+        NotificationPlanner.shared.scheduleRenewReminder(after: 50 * 60, minutesLeft: 50)
         // 会话一起就跑一次判定，把状态立刻对齐现实
         DispatchQueue.main.async { WatchEngine.shared.tick(force: true) }
     }
@@ -107,6 +122,7 @@ extension ExtendedSessionManager: WKExtendedRuntimeSessionDelegate {
         DispatchQueue.main.async { WatchEngine.shared.tick(force: true) }
         isRunning = false
         lastEndReason = "到期"
+        NotificationPlanner.shared.cancelRenewReminder()
         scheduleRestart(after: 5)
     }
 
@@ -117,6 +133,7 @@ extension ExtendedSessionManager: WKExtendedRuntimeSessionDelegate {
     ) {
         guard extendedRuntimeSession === session else { return }
         isRunning = false
+        NotificationPlanner.shared.cancelRenewReminder()
         lastEndReason = error?.localizedDescription ?? "被系统结束(reason \(reason.rawValue))"
         consecutiveFailures += 1
         // 真正连续被拒（'too many sessions' 之类限流）才退避到 2 分钟，
