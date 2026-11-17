@@ -31,6 +31,8 @@ final class WatchEngine: ObservableObject {
 
     private var timer: Timer?
     private var busy = false
+    /// 这一轮查询是什么时候发起的。用来解除卡死，见 tick()。
+    private var busySince: Date?
     private var pendingForce = false
     private var booted = false
 
@@ -77,14 +79,25 @@ final class WatchEngine: ObservableObject {
 
     func tick(force: Bool) {
         if busy {
-            // 已经在查了。force 的那次不能悄悄丢掉 —— 用户点进来这一刻的答案必须
-            // 是准的，所以记一笔，等这一轮回来再补跑一次（串行，不并发）。
-            // 以前 force 会直接并行进来，两次查询的回调互相覆盖 stepsInWindow，
-            // 于是同一秒里先得 195 再得 200 —— 这也是"两条通知先后到"的帮凶。
-            if force { pendingForce = true }
-            return
+            // 卡死保护：CMPedometer 的回调有可能永远不来 —— 在「App 正要被系统
+            // 冻结」的那一瞬间发起查询就是这样：进程冻住，回调排不上，解冻后
+            // 也可能已经丢了。不解除的话 busy 永真，之后每一次 tick 都被这里
+            // 直接丢弃：界面不动、通知也不再重排，用户「点开才发现弹窗根本没弹」。
+            if let since = busySince, Date().timeIntervalSince(since) > 10 {
+                busy = false
+                busySince = nil
+                pendingForce = false
+            } else {
+                // 已经在查了。force 的那次不能悄悄丢掉 —— 用户点进来这一刻的答案必须
+                // 是准的，所以记一笔，等这一轮回来再补跑一次（串行，不并发）。
+                // 以前 force 会直接并行进来，两次查询的回调互相覆盖 stepsInWindow，
+                // 于是同一秒里先得 195 再得 200 —— 这也是"两条通知先后到"的帮凶。
+                if force { pendingForce = true }
+                return
+            }
         }
         busy = true
+        busySince = Date()
         reloadConfig()
 
         let now = Date()
@@ -116,6 +129,7 @@ final class WatchEngine: ObservableObject {
             self.apply(steps: steps, anchor: anchor, now: now, cfg: cfg)
             self.reconcileNotifications(steps: steps, anchor: anchor, now: Date(), cfg: cfg)
             self.busy = false
+            self.busySince = nil
             if self.pendingForce {
                 self.pendingForce = false
                 self.tick(force: true)
@@ -331,13 +345,18 @@ final class WatchEngine: ObservableObject {
         // 已经有更早的待发通知就沿用，避免每 30 秒的 tick 把它往后推。
         let fire: Date
         if now >= deadline {
-            if let p = NotificationPlanner.shared.nextFireAt, p > now {
+            // 按当前配置算出「这一刻该几点再催」。
+            let base = AnchorStore.shared.lastNudgeAt ?? now
+            let due = max(base.addingTimeInterval(cfg.tick), now.addingTimeInterval(5))
+            // **但只有它跟当前配置算出来的时刻吻合时才沿用**：窗口/间隔改过之后，
+            // 系统里那条是按旧参数排的，硬沿用就等于一直按上一轮的节奏走，
+            // 直到它自己弹出来为止 —— 这正是「改成 2 分钟，实际还按上一轮走，
+            // 必须等它触发过一次、点进去，才变成 2 分钟」的成因。
+            if let p = NotificationPlanner.shared.nextFireAt, p > now,
+               abs(p.timeIntervalSince(due)) <= 2 {
                 fire = p
             } else {
-                let base = AnchorStore.shared.lastNudgeAt ?? now
-                let due = base.addingTimeInterval(cfg.tick)
-                // 已经错过了就 5 秒后补一条（比如刚从挂起/重启里醒来）
-                fire = max(due, now.addingTimeInterval(5))
+                fire = due
             }
         } else {
             // 窗口未满：排在窗口到期那一刻
@@ -375,6 +394,7 @@ final class WatchEngine: ObservableObject {
 
     func update(_ mutate: (inout Config) -> Void) {
         let wasEnabled = config.enabled
+        let old = config
         var c = config
         mutate(&c)
         c.save()
@@ -387,6 +407,19 @@ final class WatchEngine: ObservableObject {
         // 重新打开不该当场就震：锚点可能停在几小时前，一开就是「已经坐了 4 小时」。
         // 给一个完整的新窗口。
         if !wasEnabled && c.enabled {
+            AnchorStore.shared.reset(to: Date())
+        }
+
+        // 窗口/间隔改过 = 重新定义「一轮」。
+        //
+        // 不重置锚点的话：把 30 分钟改成 2 分钟那一刻，判定看到的是「已坐 33 分钟」，
+        // 立刻进入催命态 —— 用户想要的是「从两分钟开始重新计时」，不是立刻挨骂。
+        // 不撤旧排期的话：系统里那条按旧参数排的通知还占着 id，会按上一轮的节奏
+        // 一直响到它自己弹完为止。两处一起改，配置才会当场生效。
+        let rhythmChanged = c.windowMinutes != old.windowMinutes
+            || c.tickMinutes != old.tickMinutes
+        if rhythmChanged && c.enabled {
+            NotificationPlanner.shared.cancelAll()
             AnchorStore.shared.reset(to: Date())
         }
 
