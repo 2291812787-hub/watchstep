@@ -25,6 +25,9 @@ final class NotificationPlanner {
     static let baseID = "ws.nudge"
     /// 链上第 i 条。必须各用各的 id，否则系统里只能存在一条。
     static func chainID(_ i: Int) -> String { "\(baseID).c\(i)" }
+    /// 测试通知独立 id，不参与链对账，也不被 cancelAll 撤掉。
+    static let testID = "ws.test"
+
     /// 统一标题。只有「走够了」那条会临时换成别的。
     static let title = "起来走走"
     /// 一次最多排几条。系统上限是 64，留足余量。
@@ -67,7 +70,9 @@ final class NotificationPlanner {
     /// `body` 按每一条自己的触发时刻生成：坐着的分钟数必须按它真正弹出的那一刻算，
     /// 用现在的时刻算会少报好几分钟。
     func replaceChain(_ fires: [Date], now: Date = Date(), body: (Date) -> String) {
-        let want = fires.filter { $0.timeIntervalSince(now) > 1 }.sorted()
+        // 只要还在未来就得排。以前这里是 `> 1`，把「刚过去半秒」的 deadline
+        // 一起丢掉 —— 那正是 5 分钟那条从没排进去的原因。
+        let want = fires.filter { $0.timeIntervalSince(now) > 0.5 }.sorted()
 
         if want.count == chain.count {
             var same = true
@@ -94,7 +99,7 @@ final class NotificationPlanner {
                 content.interruptionLevel = .timeSensitive
             }
 
-            let delay = fire.timeIntervalSince(now)
+            let delay = max(1, fire.timeIntervalSince(now))
             let trigger = UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
             let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
             center.add(request, withCompletionHandler: nil)
@@ -144,6 +149,40 @@ final class NotificationPlanner {
         for i in 0..<Self.maxSlots { ids.append(Self.chainID(i)) }
         center.removeDeliveredNotifications(withIdentifiers: ids)
     }
+
+    /// 排一条 N 秒后必定该响的测试通知。
+    ///
+    /// 存在的理由：前面几轮全是「改一版 → 等 5 分钟 → 你说没响 → 再猜」，
+    /// 每轮要好几分钟，而且分不清是「没排进去」「排进去没弹」「弹了没震动」。
+    /// 有了这个，按一下 15 秒就有答案：标题写排定时刻，正文写排定的钟点，
+    /// 弹出时和真实钟点一比就知道延迟多少。
+    func scheduleTest(after seconds: TimeInterval = 15, completion: @escaping (String) -> Void) {
+        let now = Date()
+        let fire = now.addingTimeInterval(seconds)
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+
+        let content = UNMutableNotificationContent()
+        content.title = "测试 " + f.string(from: fire)
+        content.body = "排定 \(f.string(from: fire)) 响，现在 \(f.string(from: now))"
+        content.sound = .default
+
+        center.removePendingNotificationRequests(withIdentifiers: [Self.testID])
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, seconds), repeats: false)
+        let request = UNNotificationRequest(identifier: Self.testID, content: content, trigger: trigger)
+        center.add(request) { error in
+            DispatchQueue.main.async {
+                if let e = error {
+                    completion("✗ 测试通知排不进去：" + e.localizedDescription)
+                } else {
+                    completion("· 测试已排 " + f.string(from: fire) + " 响（现在 " + f.string(from: now) + "）")
+                }
+            }
+        }
+    }
+
+    /// 链里各条的触发时刻，给自检页直接看「系统里到底排着几点」。
+    var plannedFires: [Date] { chain.map { $0.fireAt } }
 
     func pendingCount(_ completion: @escaping (Int) -> Void) {
         center.getPendingNotificationRequests { requests in

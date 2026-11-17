@@ -355,30 +355,32 @@ final class WatchEngine: ObservableObject {
 
         // ---- 排整条链 ----
         //
-        // 时间轴 = 窗口到期那一刻，然后每隔 `间隔` 一次，一直排到 24 分钟后
-        // （最多 24 条，系统上限是 64）。
+        // 第一条必须是**窗口到期那一刻**（deadline），不是"下一个整分钟边界"。
+        // 之前的写法是「从 deadline 开始、每次 +tick、跳过已经过去的」——
+        // 而 tick 通常比 deadline 晚几百毫秒才跑，deadline 正好被判为"已过去"丢掉，
+        // 于是第一条变成 deadline + tick：设 5 分钟，第一条却排在 6 分钟。
+        // 用户看到的就是「5 分钟到了没响，隔一会儿才来一条」，自检里待发条数
+        // 也总是比应有值少一截。
         //
-        // 这条链就是「App 死了也照样提醒」的全部实现。之前只排一条，响应完就没了，
-        // 下一条要等 App 醒来 —— 用户看到的是「第一个窗口结束响过，第二个就没了」。
-        //
-        // 时刻锚定在 deadline 上、不随 tick 漂移：每 30 秒重排一次算出来的结果完全相同，
-        // replaceChain 会直接跳过，于是不会出现"每次重排都往后推一分钟、永远差一分钟"。
+        // 已经过了窗口（催命期）时，下一条按「上次催命 + 一个间隔」算，
+        // 也就是正文里承诺的那一刻；实在错过了就 5 秒后补。
+        let first: Date
+        if now < deadline {
+            first = deadline
+        } else {
+            let base = AnchorStore.shared.lastNudgeAt ?? deadline
+            first = max(base.addingTimeInterval(cfg.tick), now.addingTimeInterval(5))
+        }
+
         var fires: [Date] = []
-        var t = deadline
-        var guardCount = 0
+        var t = first
         let horizon = now.addingTimeInterval(24 * 60)
         while t <= horizon && fires.count < NotificationPlanner.maxSlots {
-            // 已经到点的不用排（那条该由实时催命负责），过了生效时段也不再排
-            if t.timeIntervalSince(now) > 1 {
-                if !cfg.isActive(at: t) { break }
-                fires.append(t)
-            }
+            if !cfg.isActive(at: t) { break }
+            fires.append(t)
             t = t.addingTimeInterval(cfg.tick)
-            guardCount += 1
-            if guardCount > 200 { break }
         }
-        // 窗口本身比 24 分钟还长（比如 30 分钟）：只排到期那一条
-        if fires.isEmpty { fires = [deadline] }
+        if fires.isEmpty { fires = [first] }
 
         // 坐着的分钟数按通知**真正弹出的时刻**现算，不按现在算 ——
         // 排程可能提前好几分钟，用 now 算会少报。
@@ -503,6 +505,16 @@ final class WatchEngine: ObservableObject {
     // MARK: - 自检（验收标准第 4、5 条就靠它）
 
     /// 逐条核对不变量，把结论打在界面上。装上去第一件事就是跑它。
+    /// 自检页那个「测试通知」按钮：15 秒后该响一条，用来验投递通路。
+    /// 响不出来 → 是权限/投递问题；响得出来但晚了 → 是排程时刻问题。
+    func testNotificationNow() {
+        selfCheckLog.insert("· 按了测试通知按钮", at: 0)
+        NotificationPlanner.shared.scheduleTest(after: 15) { [weak self] msg in
+            guard let self = self else { return }
+            self.selfCheckLog.insert(msg, at: 0)
+        }
+    }
+
     func runSelfCheck() {
         var log: [String] = []
         let now = Date()
@@ -586,6 +598,18 @@ final class WatchEngine: ObservableObject {
                     }
                 } else {
                     lines.append("· 无待发通知")
+                }
+
+                // 7. 系统里那几条到底排在几点 —— 直接看，不靠推算。
+                // 「设 5 分钟却 6 分钟才响」就是靠这一行确认的。
+                let fm = DateFormatter()
+                fm.dateFormat = "HH:mm:ss"
+                let planned = NotificationPlanner.shared.plannedFires.prefix(4)
+                if planned.isEmpty {
+                    lines.append("· 链内容为空（系统里没排）")
+                } else {
+                    let shown = planned.map { fm.string(from: $0) }.joined(separator: " ")
+                    lines.append("· 排定：" + shown)
                 }
 
                 self.selfCheckLog = lines

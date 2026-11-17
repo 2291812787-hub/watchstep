@@ -25,6 +25,10 @@ struct SelfCheckView: View {
                 Button("重新自检") { engine.runSelfCheck() }
                     .font(.system(size: 11))
 
+                Button("测试通知 15 秒后") { engine.testNotificationNow() }
+                    .font(.system(size: 11))
+                    .foregroundStyle(.blue)
+
                 Button("关闭") { dismiss() }
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
