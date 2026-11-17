@@ -94,10 +94,11 @@ final class NotificationPlanner {
             content.title = Self.title
             content.body = body(fire)
             content.sound = .default
-            if #available(watchOS 8.0, *) {
-                // 熄屏、专注模式下也别被压掉 —— 提醒晚了就等于没提醒。
-                content.interruptionLevel = .timeSensitive
-            }
+            // 这里曾经设过 .timeSensitive（时效性通知）。那是错的：
+            // 它需要 com.apple.developer.usernotifications.time-sensitive 权限，
+            // 免费签名的个人开发者账户拿不到。缺权限时 add() 不报错、待发条数
+            // 照样算得进去，但到点系统不投递 —— 正是「排了 12 条，一条都不响」。
+            // 默认 .active 就能弹横幅 + 响铃 + 震动，不需要任何额外权限。
 
             let delay = max(1, fire.timeIntervalSince(now))
             let trigger = UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
@@ -121,9 +122,6 @@ final class NotificationPlanner {
         content.title = title
         content.body = body
         content.sound = .default
-        if #available(watchOS 8.0, *) {
-            content.interruptionLevel = .timeSensitive
-        }
 
         let request = UNNotificationRequest(identifier: Self.baseID, content: content, trigger: nil)
         center.add(request, withCompletionHandler: nil)
