@@ -56,10 +56,26 @@ final class NotificationPlanner {
     /// 否则随后醒来的 tick 会因为"还没催过"再补一条，用户就同时收到两条。
     @discardableResult
     func consumeDelivered(now: Date = Date()) -> Date? {
-        guard let first = chain.first, first.fireAt <= now else { return nil }
-        chain.removeFirst()
-        lastDeliveredAt = first.fireAt
-        return first.fireAt
+        // 一次吃完**全部**已经过点的槽位，取最晚的那一个。
+        //
+        // 以前只 removeFirst 一条。App 睡过好几个间隔再醒来时，链上已经有 3、4 条
+        // 都过了点（真响过、也真震过），却只认账 1 条 —— 剩下的在内存里还算"待发"，
+        // 下一轮 reconcile 又按它们重排一遍，于是十几秒内连补好几条。
+        // 用户看到的就是「一分钟里隔几秒来一条」。
+        var latest: Date?
+        while let first = chain.first, first.fireAt <= now {
+            latest = first.fireAt
+            chain.removeFirst()
+        }
+        if let l = latest { lastDeliveredAt = l }
+        return latest
+    }
+
+    /// 距上一次真正送出去还不到 minGap 就不许再发。
+    /// 这是物理层的兜底：上面的判定逻辑将来再改错，也不会连发。
+    func canDeliver(now: Date = Date(), minGap: TimeInterval) -> Bool {
+        guard let last = lastDeliveredAt else { return true }
+        return now.timeIntervalSince(last) >= minGap
     }
 
     /// 让系统里排着的那条链，正好等于 `fires`（未来时刻，升序）。
@@ -69,17 +85,22 @@ final class NotificationPlanner {
     ///
     /// `body` 按每一条自己的触发时刻生成：坐着的分钟数必须按它真正弹出的那一刻算，
     /// 用现在的时刻算会少报好几分钟。
-    func replaceChain(_ fires: [Date], now: Date = Date(), body: (Date) -> String) {
+    @discardableResult
+    func replaceChain(_ fires: [Date], now: Date = Date(), body: (Date) -> String) -> Bool {
         // 只要还在未来就得排。以前这里是 `> 1`，把「刚过去半秒」的 deadline
         // 一起丢掉 —— 那正是 5 分钟那条从没排进去的原因。
-        let want = fires.filter { $0.timeIntervalSince(now) > 0.5 }.sorted()
+        //
+        // 现在放宽到「过去 2.5 秒内还算数」：迟到的那个网格点必须补一条"马上就响"，
+        // 否则设 5 分钟会变成 6 分钟才响。重复的风险由调用方兜着 ——
+        // 引擎每轮先用 consumeDelivered 认账，再用 dedupeGap 把这些点剔掉。
+        let want = fires.filter { $0.timeIntervalSince(now) > -2.5 }.sorted()
 
         if want.count == chain.count {
             var same = true
             for (i, w) in want.enumerated() {
                 if abs(w.timeIntervalSince(chain[i].fireAt)) > 2 { same = false; break }
             }
-            if same { return }
+            if same { return false }
         }
 
         // **先加后删**。同 id 的 add 是原子替换，所以任何一刻系统里都有通知排着。
@@ -115,6 +136,7 @@ final class NotificationPlanner {
         }
 
         chain = fresh
+        return true
     }
 
     /// 立刻弹一条。只在 app 活着、且这一刻的数字是真的的时候用 ——
@@ -123,7 +145,14 @@ final class NotificationPlanner {
     /// **不再撤掉整条链**。以前它会把唯一那条兜底排期一起撤掉，于是每次实时
     /// 催命都会把后续提醒清空，App 一睡就再也不响 —— 这正是"点开才发现弹窗没弹"。
     /// 现在只弹自己这一条（同 id 互相顶掉），链原样留着。
-    func fireNow(body: String, title: String = "起来走走", now: Date = Date()) {
+    @discardableResult
+    func fireNow(body: String, title: String = "起来走走", now: Date = Date(),
+                 minGap: TimeInterval = 0) -> Bool {
+        // minGap 是最后一道物理闸门。以前没有任何闸门：判定逻辑一抖，
+        // 这里就再弹一条，用户手腕上几十秒内收到好几条一样的。
+        if minGap > 0, !canDeliver(now: now, minGap: minGap) {
+            return false
+        }
         lastDeliveredAt = now
         center.removeDeliveredNotifications(withIdentifiers: [Self.baseID])
 
@@ -134,6 +163,7 @@ final class NotificationPlanner {
 
         let request = UNNotificationRequest(identifier: Self.baseID, content: content, trigger: nil)
         center.add(request, withCompletionHandler: nil)
+        return true
     }
 
     /// 撤掉待发的整条链（走够了、充电、摘下、关掉开关时用）。

@@ -197,6 +197,20 @@ final class WatchEngine: ObservableObject {
         // 「充电中，暂停」，留一个上一轮的旧值会显示成「正常」——那是骗人。
         quiet = RuleEngine.quietReason(now: now, config: cfg, surroundings: env)
 
+        // ---- 先认账：挂起期间链上过点的槽位可能已经真弹过了 ----
+        //
+        // 必须在步数 guard **之前**。以前认账放在 .nudge / .satisfied 两个分支里，
+        // 于是"CMPedometer 这轮没返回"就走不到认账，而 reconcile 照样跑：
+        // 它按旧状态重排链，那批"其实已经响过"的时刻又被排了一遍 → 几秒后连响。
+        // 读不到步数时唯一必须做的事，就是别把已经响过的再排一遍。
+        let preDelivered = NotificationPlanner.shared.consumeDelivered(now: now)
+        if let d = preDelivered,
+           AnchorStore.shared.lastNudgeAt == nil || d > AnchorStore.shared.lastNudgeAt! {
+            AnchorStore.shared.lastNudgeAt = d
+            AnchorStore.shared.nudgesToday += 1
+            nudgesToday = AnchorStore.shared.nudgesToday
+        }
+
         guard let steps = steps else {
             lastDecision = .unknown
             lastError = stepCountingAvailable ? "读不到步数（运动权限？）" : "这台设备不支持计步"
@@ -215,11 +229,7 @@ final class WatchEngine: ObservableObject {
             // 挂起期间那条预排的"起来走动"可能已经被系统弹出来了（它的步数是
             // 排程时的快照，现在可能是错的）。先认账、再从通知中心撤掉，
             // 然后只发一条正确的 —— 用户不会看到"先催命、后说走够"这种自打嘴巴。
-            let delivered = NotificationPlanner.shared.consumeDelivered(now: now)
-            if let d = delivered {
-                AnchorStore.shared.lastNudgeAt = d
-                AnchorStore.shared.nudgesToday += 1
-            }
+            let delivered = preDelivered
             // 不在这里 cancelAll：撤光和重排之间若被系统冻结，系统里一条通知都不剩，
             // 而 App 已死、没人能补。replaceChain 会自己撤掉多余槽位。
 
@@ -251,7 +261,13 @@ final class WatchEngine: ObservableObject {
             if let q = quiet, q != .lowBattery {
                 AnchorStore.shared.nudgingSince = nil
                 AnchorStore.shared.lastNudgeAt = nil
-                NotificationPlanner.shared.cancelAll()
+                // 后台不许撤链：充电状态在挂起边缘可能读到旧值，
+                // 一撤空就再没人排回来（和 clearChain 同一个理由）。
+                if isBackgroundNow() {
+                    AnchorStore.shared.noteChain("≈ 后台想撤(安静:\(q))，拒绝")
+                } else {
+                    NotificationPlanner.shared.cancelAll()
+                }
                 if now.timeIntervalSince(anchor) >= cfg.window {
                     AnchorStore.shared.anchor = now
                 }
@@ -266,16 +282,22 @@ final class WatchEngine: ObservableObject {
             let last = AnchorStore.shared.lastNudgeAt
             let canNudge = last == nil || now.timeIntervalSince(last!) >= cfg.tick
 
-            // 挂起期间那条预排的兜底通知可能已经自己弹出来了 —— 那一条就是这次催命。
-            // 不认账的话，现在醒来就会再补一条，用户手腕上就是两条几乎一样的通知。
-            let delivered = NotificationPlanner.shared.consumeDelivered(now: now)
-            if let d = delivered, last == nil || d > last! {
-                AnchorStore.shared.lastNudgeAt = d
-                AnchorStore.shared.nudgesToday += 1
+            // 挂起期间预排的那条可能已经自己弹出来了 —— 那一条就是这次催命。
+            // 认账在上面统一做过了；这里只要"刚刚已经响过"就别再补一条。
+            // 用 dedupeGap 而不是 tick：tick 是"该催的间隔"，dedupeGap 是
+            // "两条真提醒之间最少隔多久"，后者才是防重复的那道线。
+            let recent = AnchorStore.shared.lastNudgeAt.map {
+                now.timeIntervalSince($0) < Self.dedupeGap(cfg)
+            } ?? false
+            if recent {
+                // 这一轮就是那条已经响过的，什么都不做。
             } else if canNudge {
-                fireNudge(steps: steps, anchor: anchor, now: now, cfg: cfg)
-                AnchorStore.shared.lastNudgeAt = now
-                AnchorStore.shared.nudgesToday += 1
+                // 只有真发出去才记一笔。以前被去重闸门拦掉也照样记 lastNudgeAt
+                // 和次数，于是计数虚高、触感序列错乱，还会把下一次机会推后。
+                if fireNudge(steps: steps, anchor: anchor, now: now, cfg: cfg) {
+                    AnchorStore.shared.lastNudgeAt = now
+                    AnchorStore.shared.nudgesToday += 1
+                }
             }
             AnchorStore.shared.noteIdle(now.timeIntervalSince(anchor))
             nudgesToday = AnchorStore.shared.nudgesToday
@@ -288,7 +310,18 @@ final class WatchEngine: ObservableObject {
 
     /// 催命：震动 + 一条立即投递的通知。
     /// 只有震动的话，抬腕什么也看不到，用户根本不知道刚才震的是谁。
-    private func fireNudge(steps: Int, anchor: Date, now: Date, cfg: Config) {
+    @discardableResult
+    private func fireNudge(steps: Int, anchor: Date, now: Date, cfg: Config) -> Bool {
+        // 去重闸门放在震动之前：被抑制时连震都不震，
+        // 否则"不弹通知但一直震"同样烦人。
+        let gap = Self.dedupeGap(cfg)
+        if let last = AnchorStore.shared.lastNudgeAt,
+           now.timeIntervalSince(last) < gap {
+            AnchorStore.shared.noteChain(
+                "≈ 抑制重复催命 \(Int(now.timeIntervalSince(last)))s<" + "\(Int(gap))s")
+            return false
+        }
+
         let count = AnchorStore.shared.nudgesToday
         // 每次给一串触感，间隔 0.7 秒。连着调用会被系统合并成一下，
         // 必须错开时间，才不会被误认为错觉或系统提示。
@@ -313,6 +346,15 @@ final class WatchEngine: ObservableObject {
             ),
             now: now
         )
+        return true
+    }
+
+    /// 两条真实提醒之间至少隔多久。
+    /// 取间隔的一半（1 分钟 → 30 秒，5 分钟 → 60 秒），下限 20 秒。
+    /// 上限压到 60 秒：5 分钟间隔时如果闸门放到 2.5 分钟，
+    /// App 活着时的实时催命会被压成一条，反而变少。
+    static func dedupeGap(_ cfg: Config) -> TimeInterval {
+        return max(20, min(cfg.tick / 2, 60))
     }
 
     // MARK: - 通知对账（关键）
@@ -367,41 +409,55 @@ final class WatchEngine: ObservableObject {
 
         let deadline = RuleEngine.deadline(anchor: anchor, config: cfg)
 
-        // ---- 排整条链 ----
+        // ---- 时刻表 = 固定网格，绝不跟着 now 漂移 ----
         //
-        // 第一条必须是**窗口到期那一刻**（deadline），不是"下一个整分钟边界"。
-        // 之前的写法是「从 deadline 开始、每次 +tick、跳过已经过去的」——
-        // 而 tick 通常比 deadline 晚几百毫秒才跑，deadline 正好被判为"已过去"丢掉，
-        // 于是第一条变成 deadline + tick：设 5 分钟，第一条却排在 6 分钟。
-        // 用户看到的就是「5 分钟到了没响，隔一会儿才来一条」，自检里待发条数
-        // 也总是比应有值少一截。
+        // 以前是 `first = max(lastNudge + tick, now + 5)`。只要 lastNudgeAt 是 nil
+        // （充过电、刚启动、正好赶上"安静"分支清过它），first 就每次重建都变成
+        // 「现在 + 5 秒」—— 每 tick 一次就往后挪 5 秒，于是链的起点永远对不上，
+        // 每次都判定"不一样"、整链重建，而每重建一次 slot0 就是个新的 5 秒后
+        // → 十几秒后又弹一条。这是"一分钟里隔几秒连发好几条"的全部机制：
+        // **漂移 → 重建 → 新排期 → 又漂移**，自己喂自己。
         //
-        // 已经过了窗口（催命期）时，下一条按「上次催命 + 一个间隔」算，
-        // 也就是正文里承诺的那一刻；实在错过了就 5 秒后补。
-        let first: Date
-        if now < deadline {
-            first = deadline
-        } else {
-            let base = AnchorStore.shared.lastNudgeAt ?? deadline
-            first = max(base.addingTimeInterval(cfg.tick), now.addingTimeInterval(5))
-        }
+        // 现在改成挂在锚点上的固定网格：deadline + k × tick。网格点不随 now 变，
+        // 于是同一个 tick 反复跑，算出来的 want 完全一样，replaceChain 直接跳过。
+        // 只有当某个网格点真的过去（跨过一条提醒）时，链才降一位、重排一次 ——
+        // 即每分钟最多一次，而不是每十几秒一次。
+        let step = max(cfg.tick, 5)
+        let gap = Swift.max(10, Swift.min(step / 2, 60))
+        let lastNudge = AnchorStore.shared.lastNudgeAt
 
         var fires: [Date] = []
-        var t = first
+        var t = deadline
         // 只由 maxSlots 决定链有多长，不再另设"从现在起 24 分钟内"的截断。
         // 那个截断和旧的 maxSlots = 24 配套，改大之后忘了同步，于是设 30 分钟窗口时
         // first（30 分钟后）已经落在截断之外 → fires 为空 → 兜底成「只排 1 条」，
         // 响完系统里就空了，App 不醒就再也不响。用户看到的「只响一两条就没了」就是它。
         while fires.count < NotificationPlanner.maxSlots {
             if !cfg.isActive(at: t) { break }
-            fires.append(t)
-            t = t.addingTimeInterval(cfg.tick)
+            // 宽容 1 秒：tick 比 deadline 晚几百毫秒才跑，紧贴 deadline 的那个点
+            // 会被判成"已过去"而丢掉 —— 设 5 分钟就变成 6 分钟才响（老毛病）。
+            // 留着它、交给下面的 max(1, …) 变成"1 秒后响"才是对的。
+            if t.timeIntervalSince(now) >= -2 {
+                // 刚催过就别再排紧挨着的那个点，否则等于同一分钟里两条。
+                if lastNudge == nil || Swift.abs(t.timeIntervalSince(lastNudge!)) >= gap {
+                    fires.append(t)
+                }
+            }
+            t = t.addingTimeInterval(step)
         }
-        if fires.isEmpty { fires = [first] }
+        if fires.isEmpty {
+            // 窗口到期那一刻本身就在生效时段之外（比如 23:59 到期、次日 8:00 才开门）。
+            // 这种情况一条都不该排，也别去动现有的链 —— 等进了时段自然会重排。
+            if !cfg.isActive(at: deadline) {
+                AnchorStore.shared.noteChain("窗口落在时段外，链不动")
+                return
+            }
+            fires = [Swift.max(deadline, now.addingTimeInterval(5))]
+        }
 
         // 坐着的分钟数按通知**真正弹出的时刻**现算，不按现在算 ——
         // 排程可能提前好几分钟，用 now 算会少报。
-        NotificationPlanner.shared.replaceChain(fires, now: now) { fire in
+        let changed = NotificationPlanner.shared.replaceChain(fires, now: now) { fire in
             NudgeText.reminder(
                 targetSteps: cfg.targetSteps,
                 steps: steps,
@@ -412,7 +468,12 @@ final class WatchEngine: ObservableObject {
         }
 
         pendingNotifications = NotificationPlanner.shared.chainCount
-        AnchorStore.shared.noteChain("排\(fires.count)条 \(fmt(first))→\(fmt(fires.last ?? first))")
+        // 只在链真的变了才写审计。以前每 30 秒 tick 都写一行，日志里全是
+        // "排60条"，把"链什么时候变空"这种真信息淹掉了。
+        if changed {
+            AnchorStore.shared.noteChain(
+                "排\(fires.count)条 \(fmt(fires[0]))→\(fmt(fires[fires.count - 1]))")
+        }
     }
 
     private func fmt(_ d: Date) -> String {
