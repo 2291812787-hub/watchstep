@@ -1,25 +1,31 @@
 import Foundation
 import UserNotifications
 
-/// 兜底通知。
+/// 通知（也是唯一一条）。
 ///
-/// 定位：app 挂起时唯一能把手机在手腕上震响的东西。
-/// 规则：**系统里永远最多一条待发通知，id 固定**。每次 app 醒来（任何原因）
-/// 都先清空再按当前锚点重排 —— 所以它不可能和真实状态长期脱节。
+/// 核心约束：**全文只有一个通知 id**。预排的兜底通知，和 app 活着时
+/// 立刻弹的那条，用的是同一个 identifier —— 于是系统里永远最多存在一条，
+/// 物理上不可能出现「起来走走」和「还差 137 步」几乎同时冒出来两条。
 ///
-/// 注意：本条路径用的是本地通知，不需要 Push Notifications 能力，
-/// 免费签名账号也能用（本地通知不是 entitlement）。
+/// 定位：app 挂起时，这是唯一能把手机在手腕上震响的东西。
+/// 用的是本地通知，不需要 Push Notifications 能力，免费签名账号也能用。
 final class NotificationPlanner {
     static let shared = NotificationPlanner()
 
+    /// 唯一 id。所有通知共用，新的一律顶掉旧的。
     static let identifier = "ws.nudge"
+    /// 统一标题。只有「走够了」那条会临时换成别的。
+    static let title = "起来走走"
 
     private let center = UNUserNotificationCenter.current()
 
-    /// 当前排进系统的那条通知的触发时刻（本地记账，用来避免反复重排）。
+    /// 当前排进系统的那条兜底通知的触发时刻（本地记账）。
     /// 教训：tick 每 30 秒一次，如果每次都 remove + add(now + 60s)，
     /// 那条通知就被无限推后、永远送不出去 —— 表现就是"催了五六次才冒出来一次"。
     private var pendingFireAt: Date?
+
+    /// 最近一次真正送出去的时刻（兜底那条，或 app 活着时立刻弹的那条）。
+    private(set) var lastDeliveredAt: Date?
 
     func requestAuthorization() {
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in
@@ -27,13 +33,26 @@ final class NotificationPlanner {
         }
     }
 
-    /// 用一条新通知替换掉旧的。`fireAt == nil` 表示现在不该有任何待发通知。
+    /// 兜底通知有没有已经送出去。系统不会回调我们，只能靠触发时刻反推。
+    ///
+    /// 返回非 nil 说明那一条**已经震过手腕了** —— 调用方必须把它记成一次催命，
+    /// 否则随后醒来的 tick 会因为"还没催过"再补一条，用户就同时收到两条。
+    @discardableResult
+    func consumeDelivered(now: Date = Date()) -> Date? {
+        guard let p = pendingFireAt, p <= now else { return nil }
+        pendingFireAt = nil
+        lastDeliveredAt = p
+        return p
+    }
+
+    /// 用一条新的兜底通知替换掉旧的。`fireAt == nil` 表示现在不该有任何待发通知。
     ///
     /// 关键：**触发时刻没变就什么都不做**。否则 tick 每次重排都会把
-    /// 同一条通知往后推 60 秒，系统里永远躺着一个"还有一分钟"的通知。
+    /// 同一条通知往后推一分钟，系统里永远躺着一个"还有一分钟"的通知。
+    ///
+    /// 这里只碰"待发"的那条，不清投递箱 —— 刚弹出来的那条不该被抹掉。
     func replace(fireAt: Date?, now: Date = Date(), body: String) {
-        // 排定的时刻已经过去 = 它已经发出去了（系统不会通知我们），记账清掉
-        if let prev = pendingFireAt, prev <= now { pendingFireAt = nil }
+        consumeDelivered(now: now)
 
         if let fire = fireAt, let prev = pendingFireAt,
            abs(prev.timeIntervalSince(fire)) <= 2 {
@@ -45,16 +64,13 @@ final class NotificationPlanner {
 
         center.removePendingNotificationRequests(withIdentifiers: [Self.identifier])
         pendingFireAt = nil
-        center.removeDeliveredNotifications(withIdentifiers: [Self.identifier])
 
         guard let fire = fireAt else { return }
         let delay = fire.timeIntervalSince(now)
         guard delay > 1 else { return }
 
         let content = UNMutableNotificationContent()
-        content.title = "该走走了"
-        // 正文刻意不写"已静坐 35 分钟"这类可被证伪的数字：
-        // 通知一旦排进系统就撤不回来，写死数字就会出现"走了 1000 步还在说你静坐"的尴尬。
+        content.title = Self.title
         content.body = body
         content.sound = .default
 
@@ -64,19 +80,21 @@ final class NotificationPlanner {
         pendingFireAt = fire
     }
 
-    /// 立刻弹一条（不经排程）。
+    /// 立刻弹一条。只在 app 活着、且这一刻的数字是真的的时候用 ——
+    /// 所以正文可以写准确步数。
     ///
-    /// 只在 app 活着、且这一刻的数字是真的的时候用 —— 所以正文可以写准确步数。
-    /// watchOS 上这会抬腕亮屏 + 震动，和"弹窗"是同一种东西。
-    /// 用独立 id（带时间戳），否则会互相覆盖（同 id 新通知会顶掉旧的、旧的还留在通知中心）。
-    func fireNow(title: String, body: String) {
+    /// 会先撤掉还没发出去的兜底通知：同 id，绝不会和它并存。
+    func fireNow(body: String, title: String = "起来走走", now: Date = Date()) {
+        center.removePendingNotificationRequests(withIdentifiers: [Self.identifier])
+        pendingFireAt = nil
+        lastDeliveredAt = now
+
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
 
-        let id = "ws.now.\(Int(Date().timeIntervalSince1970))"
-        let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
+        let request = UNNotificationRequest(identifier: Self.identifier, content: content, trigger: nil)
         center.add(request, withCompletionHandler: nil)
     }
 
@@ -86,6 +104,7 @@ final class NotificationPlanner {
     func cancelAll() {
         center.removePendingNotificationRequests(withIdentifiers: [Self.identifier])
         center.removeDeliveredNotifications(withIdentifiers: [Self.identifier])
+        pendingFireAt = nil
     }
 
     /// 自检用：系统里现在到底排了几条

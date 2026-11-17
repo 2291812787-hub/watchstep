@@ -109,8 +109,9 @@ final class WatchEngine: ObservableObject {
             // 分不清是走够了还是又催一次。只在真的催过之后才提示，避免干扰。
             if wasNudging {
                 NotificationPlanner.shared.fireNow(
+                    body: "已满 \(cfg.targetSteps) 步，重新开始计时",
                     title: "走够了",
-                    body: "已满 \(cfg.targetSteps) 步，重新开始计时"
+                    now: now
                 )
             }
             nudgesToday = AnchorStore.shared.nudgesToday
@@ -122,7 +123,14 @@ final class WatchEngine: ObservableObject {
             // 震动频率独立控制：不能每次 tick 都震，否则会变成每分钟震
             let last = AnchorStore.shared.lastNudgeAt
             let canNudge = last == nil || now.timeIntervalSince(last!) >= cfg.tick
-            if canNudge {
+
+            // 挂起期间那条预排的兜底通知可能已经自己弹出来了 —— 那一条就是这次催命。
+            // 不认账的话，现在醒来就会再补一条，用户手腕上就是两条几乎一样的通知。
+            let delivered = NotificationPlanner.shared.consumeDelivered(now: now)
+            if let d = delivered, last == nil || d > last! {
+                AnchorStore.shared.lastNudgeAt = d
+                AnchorStore.shared.nudgesToday += 1
+            } else if canNudge {
                 fireNudge(steps: steps, anchor: anchor, now: now, cfg: cfg)
                 AnchorStore.shared.lastNudgeAt = now
                 AnchorStore.shared.nudgesToday += 1
@@ -151,11 +159,17 @@ final class WatchEngine: ObservableObject {
             }
         }
 
-        let remain = max(0, cfg.targetSteps - steps)
-        let sitting = Int(now.timeIntervalSince(anchor) / 60)
+        // 只发一条：id 与兜底通知相同，正文由 NudgeText 统一生成。
+        // 以前这里另用"ws.now.<时间戳>"的 id，于是"该走了"和预排的"该走走了"
+        // 会几乎同时冒出来两条，还各说一半 —— 现在物理上不可能了。
         NotificationPlanner.shared.fireNow(
-            title: "该走了",
-            body: "还差 \(remain) 步 · 已坐 \(sitting) 分钟"
+            body: NudgeText.reminder(
+                targetSteps: cfg.targetSteps,
+                steps: steps,
+                sittingMinutes: Int(now.timeIntervalSince(anchor) / 60),
+                tickMinutes: cfg.tickMinutes
+            ),
+            now: now
         )
     }
 
@@ -177,27 +191,37 @@ final class WatchEngine: ObservableObject {
         }
 
         let deadline = RuleEngine.deadline(anchor: anchor, config: cfg)
-        let nextCheck = now.addingTimeInterval(cfg.tick)
 
-        // 已在催命期：只在没有更早的兜底通知时才排一条，
-        // 时刻固定为"上次催命 + 2 个节拍"，避免每 30 秒被 tick 往后推一次。
+        // 已在催命期：排在"上次催命 + 一个间隔"—— 也就是正文里承诺的那一刻。
+        // 以前排的是 2 个间隔，比嘴上说的晚一倍，用户会觉得"说好一分钟，结果没来"。
+        // 已经有更早的待发通知就沿用，避免每 30 秒的 tick 把它往后推。
         let fire: Date
         if now >= deadline {
             if let p = NotificationPlanner.shared.nextFireAt, p > now {
                 fire = p
             } else {
                 let base = AnchorStore.shared.lastNudgeAt ?? now
-                fire = base.addingTimeInterval(cfg.tick * 2)
+                let due = base.addingTimeInterval(cfg.tick)
+                // 已经错过了就 5 秒后补一条（比如刚从挂起/重启里醒来）
+                fire = max(due, now.addingTimeInterval(5))
             }
         } else {
             // 窗口未满：排在窗口到期那一刻
             fire = deadline
         }
 
+        // 坐着的分钟数按通知**真正弹出的时刻**（fire）现算，不按现在算 ——
+        // 排程可能提前好几分钟，用 now 算会少报。
         NotificationPlanner.shared.replace(
             fireAt: fire,
             now: now,
-            body: bodyText(for: now, deadline: deadline, cfg: cfg)
+            body: NudgeText.reminder(
+                targetSteps: cfg.targetSteps,
+                steps: steps,
+                sittingMinutes: Int(fire.timeIntervalSince(anchor) / 60),
+                tickMinutes: cfg.tickMinutes,
+                approximate: true          // 步数是排程时的快照，弹出时可能又走了几步
+            )
         )
 
         NotificationPlanner.shared.pendingCount { [weak self] n in
@@ -206,15 +230,6 @@ final class WatchEngine: ObservableObject {
 
         // 会话开关：只在生效时段内占电，时段外一律释放。
         ExtendedSessionManager.shared.setDesired(cfg.enabled && cfg.isActive(at: now))
-    }
-
-    /// 通知正文。刻意不写死分钟数 —— 预排的通知撤不回来，
-    /// 写死"已静坐 35 分钟"就会出现走了很多步还在被告知静坐的尴尬。
-    private func bodyText(for now: Date, deadline: Date, cfg: Config) -> String {
-        if now >= deadline {
-            return "还没到 \(cfg.targetSteps) 步。起身走一走，\(cfg.tickMinutes) 分钟后再提醒你一次。"
-        }
-        return "\(cfg.windowMinutes) 分钟了，起来走到 \(cfg.targetSteps) 步就归零。"
     }
 
     // MARK: - 对外操作
