@@ -31,7 +31,7 @@ final class NotificationPlanner {
     /// 统一标题。只有「走够了」那条会临时换成别的。
     static let title = "起来走走"
     /// 一次最多排几条。系统上限是 64，留足余量。
-    static let maxSlots = 24
+    static let maxSlots = 60
 
     private let center = UNUserNotificationCenter.current()
 
@@ -82,11 +82,11 @@ final class NotificationPlanner {
             if same { return }
         }
 
-        let olds = chain.map { $0.id }
-        if !olds.isEmpty {
-            center.removePendingNotificationRequests(withIdentifiers: olds)
-        }
-        chain = []
+        // **先加后删**。同 id 的 add 是原子替换，所以任何一刻系统里都有通知排着。
+        // 以前的顺序是先 removePending 再 add —— App 若正好在这两步之间被系统冻结
+        // （挂起时机由系统决定，App 管不了），系统里就一条都不剩，而 App 已经死了、
+        // 没人能补回来。这正是「活着好好的，过一阵就哑了」的机制。
+        var fresh: [(id: String, fireAt: Date)] = []
 
         for (i, fire) in want.enumerated() {
             let id = Self.chainID(i)
@@ -104,8 +104,17 @@ final class NotificationPlanner {
             let trigger = UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
             let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
             center.add(request, withCompletionHandler: nil)
-            chain.append((id, fire))
+            fresh.append((id, fire))
         }
+
+        // 新链比旧链短时，把多出来的槽位撤掉。id 是 0..maxSlots-1 连续编号，
+        // 所以直接按范围撤，不依赖内存里的 chain（App 重启后它是空的）。
+        let stale = (want.count..<Self.maxSlots).map { Self.chainID($0) }
+        if !stale.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: stale)
+        }
+
+        chain = fresh
     }
 
     /// 立刻弹一条。只在 app 活着、且这一刻的数字是真的的时候用 ——

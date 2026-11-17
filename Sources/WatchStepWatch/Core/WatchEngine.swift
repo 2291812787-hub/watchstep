@@ -220,7 +220,8 @@ final class WatchEngine: ObservableObject {
                 AnchorStore.shared.lastNudgeAt = d
                 AnchorStore.shared.nudgesToday += 1
             }
-            NotificationPlanner.shared.cancelAll()
+            // 不在这里 cancelAll：撤光和重排之间若被系统冻结，系统里一条通知都不剩，
+            // 而 App 已死、没人能补。replaceChain 会自己撤掉多余槽位。
 
             AnchorStore.shared.reset(to: now)
             StepReader.shared.invalidateCache()
