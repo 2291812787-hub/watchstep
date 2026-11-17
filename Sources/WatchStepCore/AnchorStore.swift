@@ -20,6 +20,9 @@ final class AnchorStore {
         static let nudgesToday = "ws.nudgesToday"
         static let longestIdle = "ws.longestIdle"
         static let lastTickAt = "ws.lastTickAt"
+        static let lastBgTickAt = "ws.lastBgTickAt"
+        static let tickCount = "ws.tickCount"
+        static let bgTickCount = "ws.bgTickCount"
     }
 
     // MARK: - 锚点
@@ -73,6 +76,30 @@ final class AnchorStore {
         set {
             if let v = newValue { d.set(v, forKey: K.lastTickAt) }
             else { d.removeObject(forKey: K.lastTickAt) }
+        }
+    }
+
+    // MARK: - 运行痕迹（只为自检能回答"后台到底还在不在跑"）
+
+    /// 累计跑过的判定次数，以及其中几次发生在 App 不在前台时。
+    /// 前台跑得再好也不算数——问题从来只在屏幕黑掉之后。
+    var tickCount: Int {
+        get { d.integer(forKey: K.tickCount) }
+        set { d.set(newValue, forKey: K.tickCount) }
+    }
+
+    var bgTickCount: Int {
+        get { d.integer(forKey: K.bgTickCount) }
+        set { d.set(newValue, forKey: K.bgTickCount) }
+    }
+
+    /// 最后一次在后台跑判定的时刻。若它一直停在"你合上屏幕那一刻"，
+    /// 说明进程早被挂起了，后面所有催命都不会发生。
+    var lastBgTickAt: Date? {
+        get { d.object(forKey: K.lastBgTickAt) as? Date }
+        set {
+            if let v = newValue { d.set(v, forKey: K.lastBgTickAt) }
+            else { d.removeObject(forKey: K.lastBgTickAt) }
         }
     }
 

@@ -30,19 +30,7 @@ final class WatchEngine: ObservableObject {
     @Published private(set) var selfCheckLog: [String] = []
 
     private var timer: Timer?
-    /// 后台计时器（GCD）。见 `startTicker`：不能靠前台 Timer。
-    private var backgroundTicker: DispatchSourceTimer?
     private var busy = false
-    /// `busy` 是哪一刻置上的。用于卡死保护，见 `tick`。
-    private var busySince: Date?
-
-    /// 界面是否正亮着、正被看着。由 AppDelegate 的生命周期回调维护。
-    ///
-    /// 不直接问 `WKApplication.applicationState`：带着常驻运行时会话时，
-    /// 熄屏后那个值仍可能是 `.active`（会话本来就允许后台跑），拿它判断
-    /// "要不要多排几条"会永远排 1 条，等于把后台那条链彻底关掉。
-    /// 显式标志没有歧义：离开前台就是离开前台。
-    var isForeground: Bool = true
     private var pendingForce = false
     private var booted = false
 
@@ -69,54 +57,25 @@ final class WatchEngine: ObservableObject {
         tick(force: true)
     }
 
-    /// 后台计时器：每 20 秒看一眼。
-    ///
-    /// **不能用 `Timer` + `RunLoop.main`。** 那是前台定时器：屏幕一黑、App 退到
-    /// 后台，系统就把进程挂起，RunLoop 不再转，Timer 一声不响地停掉 ——
-    /// 后台不查步数、不震、也不对账，用户抬腕看表盘更是完全碰不到它。
-    /// 等点开 App 时 `applicationDidBecomeActive` 才发现早就该催，于是把欠的
-    /// 提醒一次性补发出来。用户看到的"死后台 + 点进去一堆"就是这么来的。
-    ///
-    /// GCD 的 `DispatchSourceTimer` 挂在独立队列上，不依赖 RunLoop 的事件源。
-    /// 只要进程还活着（self-care 会话保的正是这个），它就照常滴答。
+    /// 前台定时器：每 30 秒看一眼。真正的步数查询有缓存，不会打爆数据库。
     private func startTicker() {
         timer?.invalidate()
-        backgroundTicker?.cancel()
-
-        let q = DispatchQueue(label: "watchstep.ticker", qos: .utility)
-        let t = DispatchSource.makeTimerSource(queue: q)
-        t.schedule(deadline: .now() + 20, repeating: 20, leeway: .seconds(3))
-        t.setEventHandler { [weak self] in
+        let t = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             self?.tick(force: false)
         }
-        t.resume()
-        backgroundTicker = t
-
-        // 前台时再快一点，让界面数字跟得上；后台仍然靠上面那个 GCD 计时器。
-        let ui = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
-            self?.refreshUIOnly()
-        }
-        RunLoop.main.add(ui, forMode: .common)
-        timer = ui
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
-    /// 只让界面重算显示，不查步数 —— 挪动数字的活儿交给后台计时器。
-    private func refreshUIOnly() {
-        guard isForeground else { return }
-        objectWillChange.send()
+    /// 现在是不是在后台。仅用于留痕，不参与任何判定 —— 判定答错一次就会
+    /// 静默一整天，所以宁可判定只看时间，视角只用来记账。
+    private func isBackgroundNow() -> Bool {
+        return WKExtension.shared().applicationState != .active
     }
 
     // MARK: - 主循环
 
     func tick(force: Bool) {
-        // 卡死保护：正常查询 1 秒内就回来。超过 10 秒一定是回调丢了 ——
-        // 在挂起边缘发起查询、process 被冻住，completion 就永远不会来。
-        // 不解除的话 `busy` 永远为真，下面那句会让**之后每一次 tick 都被丢弃**，
-        // App 表现成"只有点进来才动一下"，然后一路静默到天荒地老。
-        if busy, let since = busySince, Date().timeIntervalSince(since) > 10 {
-            busy = false
-            busySince = nil
-        }
         if busy {
             // 已经在查了。force 的那次不能悄悄丢掉 —— 用户点进来这一刻的答案必须
             // 是准的，所以记一笔，等这一轮回来再补跑一次（串行，不并发）。
@@ -126,10 +85,17 @@ final class WatchEngine: ObservableObject {
             return
         }
         busy = true
-        busySince = Date()
         reloadConfig()
 
         let now = Date()
+        // 留痕：后台到底有没有在跑。这是唯一能证伪"死在后台"的依据，
+        // 自检页会把这两个数摆出来。
+        AnchorStore.shared.lastTickAt = now
+        AnchorStore.shared.tickCount += 1
+        if isBackgroundNow() {
+            AnchorStore.shared.lastBgTickAt = now
+            AnchorStore.shared.bgTickCount += 1
+        }
         let cfg = config
         let anchor = saneAnchor(now: now, cfg: cfg)
 
@@ -138,33 +104,22 @@ final class WatchEngine: ObservableObject {
         // 走够前的旧账，就会先发一条"起来走动"、再发一条"已满 200 步"。
         if force { StepReader.shared.invalidateCache() }
 
-        // 查哪一段？**只查最近一个窗口，不能从锚点一路累加。**
+        // 只看最近一个窗口，不是"从上次归零到现在的累计"。
         //
-        // 以前查的是 [anchor, now]。锚点在下一次走够之前不会动，所以只要用户
-        // 一直没在 30 分钟内走够 200 步，这个区间就会无限变长：坐一下午累计
-        // 三五百步是常事，于是**打开的一瞬间必然 ≥ 200 → 判「走够」→ 归零**，
-        // 用户看到的就是"一打开刚好 30 分钟满格"。而那些步数是几小时里零散
-        // 走出来的，根本不是"30 分钟内走了 200 步"。
-        //
-        // 起点取 max(锚点, now - 窗口)，见 RuleEngine.stepQueryStart。
+        // 累计口径是这一整轮的病根：锚点只在走够时推进，所以只要你一直没在
+        // 30 分钟内走够 200，这个区间就无限拉长，上午走的两千步全算进来 →
+        // 每次一算就是"早就超了" → 归零 → 界面永远是 30:00 重新开始。
+        // 你从来不是在 30 分钟内走够的，只是累计越了线。
         let windowStart = RuleEngine.stepQueryStart(anchor: anchor, now: now, config: cfg)
         StepReader.shared.steps(from: windowStart, to: now) { [weak self] steps in
             guard let self = self else { return }
-            // 判定、震动、排通知都搬到主线程执行：tick 现在由后台队列的 GCD
-            // 计时器发起，而 `apply` 要更新 @Published（SwiftUI 只在主线程安全）。
-            // 注意这和 Timer 不是一回事：main queue 的块由 libdispatch 直接唤醒
-            // 主线程，后台照样会执行；停掉的只是 RunLoop 上的 Timer 事件源。
-            let run = {
-                self.apply(steps: steps, anchor: anchor, now: now, cfg: cfg)
-                self.reconcileNotifications(steps: steps, anchor: anchor, now: Date(), cfg: cfg)
-                self.busy = false
-                self.busySince = nil
-                if self.pendingForce {
-                    self.pendingForce = false
-                    self.tick(force: true)
-                }
+            self.apply(steps: steps, anchor: anchor, now: now, cfg: cfg)
+            self.reconcileNotifications(steps: steps, anchor: anchor, now: Date(), cfg: cfg)
+            self.busy = false
+            if self.pendingForce {
+                self.pendingForce = false
+                self.tick(force: true)
             }
-            if Thread.isMainThread { run() } else { DispatchQueue.main.async(execute: run) }
         }
     }
 
@@ -312,17 +267,15 @@ final class WatchEngine: ObservableObject {
         let seq: [WKHapticType] = count < 3
             ? [.notification, .retry]
             : [.failure, .retry, .notification]
-
-        // 触觉一旦成立就不用管前台后台：会话活着时进程没被挂起，
-        // `play()` 在后台同样震得动。真正让"熄屏就死"的不是 play 失效，
-        // 而是外面那个前台 Timer 停摆 —— 已换成后台队列的 GCD 计时器。
         for (i, h) in seq.enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7 * Double(i)) {
                 WKInterfaceDevice.current().play(h)
             }
         }
 
-        // 通知只发一条，id 与兜底那条一致，内容由 NudgeText 统一生成。
+        // 只发一条：id 与兜底通知相同，正文由 NudgeText 统一生成。
+        // 以前这里另用"ws.now.<时间戳>"的 id，于是"该走了"和预排的"该走走了"
+        // 会几乎同时冒出来两条，还各说一半 —— 现在物理上不可能了。
         NotificationPlanner.shared.fireNow(
             body: NudgeText.reminder(
                 targetSteps: cfg.targetSteps,
@@ -334,16 +287,9 @@ final class WatchEngine: ObservableObject {
         )
     }
 
-    /// 任何时刻，系统里的待发通知都必须由当前锚点现算得出。
-    ///
-    /// 条数分两档，这是「后台静默」的正解：
-    ///   · 人在前台（常驻会话跑着、每 30 秒一次 tick）→ 只排 1 条，
-    ///     因为走够的那一刻我们会自己撤、自己震，排多了是噪音。
-    ///   · 其余所有情况（熄屏、挂起、会话死了）→ 一次排 6 条，
-    ///     覆盖 30 分钟。挂起期间没有任何代码在跑，这是唯一能按时震响的手段。
-    ///
-    /// 会话若还活着，它 tick 到走够会 `fireNow()` 并撤掉这条预排，
-    /// 所以兜底通知不会和实时震动叠加。
+    // MARK: - 通知对账（关键）
+
+    /// 任何时刻：系统里最多一条待发通知，且它的时刻必须由当前锚点现算得出。
     private func reconcileNotifications(steps: Int?, anchor: Date, now: Date, cfg: Config) {
         // 会话开关必须先算：下面每一条都是 early return，
         // 放在函数末尾就会被跳过 —— 一插上充电器那次 tick 正好命中第一个 guard，
@@ -352,69 +298,61 @@ final class WatchEngine: ObservableObject {
             cfg.enabled && cfg.isActive(at: now) && quiet == nil
         )
 
-        // 该彻底安静了：暂停（充电/摘下）、时段外、已走够。
+        // 充电 / 摘下时预排通知必须撤掉 —— 人不在状态上，弹了就是骚扰。
         //
         // 但「电量低」绝不能撤。低电量是「该省电」的理由，不是「别提醒我」的理由；
         // 阈值 20% 是一天里很容易碰到的普通状态，一撤就等于整条提醒链静默，
         // 用户只会得到「它没响」——然后以为 App 坏了。这正是「通知被压」的元凶之一。
-        // 所以低电量只停常驻会话（省电的地方），预排通知留着。
+        // 所以低电量只停常驻会话（省电的地方），兜底的那条通知留着。
         let q = RuleEngine.quietReason(now: now, config: cfg, surroundings: surroundings)
         if let q = q, q != .lowBattery {
-            clearScheduled(now: now)
+            NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
+            pendingNotifications = 0
             return
         }
+
         guard cfg.isActive(at: now) else {
-            clearScheduled(now: now)
+            NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
+            pendingNotifications = 0
             return
         }
+
+        // 已走够 → 一条都不该留
         if let s = steps, s >= cfg.targetSteps {
-            clearScheduled(now: now)
+            NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
+            pendingNotifications = 0
             return
         }
 
         let deadline = RuleEngine.deadline(anchor: anchor, config: cfg)
-        let interval = TimeInterval(max(1, cfg.tickMinutes)) * 60
 
-        // 第一条排在哪儿？
-        //  · 窗口还没满 → 排在窗口到期那一刻（正文承诺的那个点）；
-        //  · 已在催命期 → 排在"上次催命 + 一个间隔"，也就是上一句说的是什么时候。
-        //    已经有更早的待发通知就沿用它，别每 30 秒往后推。
-        let first: Date
+        // 已在催命期：排在"上次催命 + 一个间隔"—— 也就是正文里承诺的那一刻。
+        // 以前排的是 2 个间隔，比嘴上说的晚一倍，用户会觉得"说好一分钟，结果没来"。
+        // 已经有更早的待发通知就沿用，避免每 30 秒的 tick 把它往后推。
+        let fire: Date
         if now >= deadline {
             if let p = NotificationPlanner.shared.nextFireAt, p > now {
-                first = p
+                fire = p
             } else {
                 let base = AnchorStore.shared.lastNudgeAt ?? now
+                let due = base.addingTimeInterval(cfg.tick)
                 // 已经错过了就 5 秒后补一条（比如刚从挂起/重启里醒来）
-                first = max(base.addingTimeInterval(interval), now.addingTimeInterval(5))
+                fire = max(due, now.addingTimeInterval(5))
             }
         } else {
-            first = deadline
+            // 窗口未满：排在窗口到期那一刻
+            fire = deadline
         }
 
-        // **只排 1 条，绝不排一串。**
-        //
-        // 排 12 条试过，结果更糟：watchOS 把同一 threadIdentifier 的通知归成
-        // 一组压着不发，等抬腕/打开 App 时一次性全放出来 —— 正是最让人恼火的
-        // "点进去一堆通知"。密集提醒不能靠预排，只能靠 App 活着自己震。
-        //
-        // 所以分工是死的：
-        //   · 准点震手腕 = 常驻会话活着时每 20 秒 tick（后台队列），
-        //     到点走会话的 notifyUser（后台也震得动）
-        //   · 这一条预排 = 会话万一死了的兜底，且只兜下一次，不兜一整天
-        let slots = 1
-
-        // 坐着的分钟数按通知**真正弹出的时刻**现算，不按现在算 ——
+        // 坐着的分钟数按通知**真正弹出的时刻**（fire）现算，不按现在算 ——
         // 排程可能提前好几分钟，用 now 算会少报。
         NotificationPlanner.shared.replace(
-            firstFire: first,
-            interval: interval,
-            slots: slots,
+            fireAt: fire,
             now: now,
             body: NudgeText.reminder(
                 targetSteps: cfg.targetSteps,
                 steps: steps,
-                sittingMinutes: Int(first.timeIntervalSince(anchor) / 60),
+                sittingMinutes: Int(fire.timeIntervalSince(anchor) / 60),
                 tickMinutes: cfg.tickMinutes,
                 approximate: true          // 步数是排程时的快照，弹出时可能又走了几步
             )
@@ -423,14 +361,6 @@ final class WatchEngine: ObservableObject {
         NotificationPlanner.shared.pendingCount { [weak self] n in
             self?.pendingNotifications = n
         }
-    }
-
-    /// 撤掉所有待发通知，并把界面上的条数清零。
-    private func clearScheduled(now: Date) {
-        NotificationPlanner.shared.replace(
-            firstFire: nil, interval: 0, slots: 1, now: now, body: ""
-        )
-        pendingNotifications = 0
     }
 
     // MARK: - 对外操作
@@ -537,6 +467,13 @@ final class WatchEngine: ObservableObject {
         //    以前三个包的 CFBundleVersion 全是 1.0(1)，装了旧包也看不出来。
         log.append("构建 \(BuildInfo.stamp)")
 
+        // 0.5 运行痕迹：这是判断"到底死了没有"的唯一硬证据。
+        //     bg = 后台检查次数。它一直是 0 就说明进程在后台根本没醒过。
+        let store = AnchorStore.shared
+        let bgAgo = store.lastBgTickAt.map { Int(now.timeIntervalSince($0) / 60) }
+        let bgTxt = bgAgo.map { "\($0) 分钟前" } ?? "从未"
+        log.append("· 检查 \(store.tickCount) 次，其中后台 \(store.bgTickCount) 次（最近 \(bgTxt)）")
+
         // 1. 锚点合理性：不该在未来，也不该比"窗口 + 1 小时"还久（除非整天没开）
         if anchor > now.addingTimeInterval(60) {
             log.append("✗ 锚点在未来（时钟跳变？）")
@@ -550,22 +487,18 @@ final class WatchEngine: ObservableObject {
         NotificationPlanner.shared.pendingCount { [weak self] n in
             guard let self = self else { return }
             var lines = log
-            if n == 0 {
-                lines.append("✓ 无待发通知")
-            } else if n == 1 {
-                lines.append("✓ 待发通知 1 条")
+            if n <= 1 {
+                lines.append("✓ 待发通知 \(n) 条")
             } else {
-                lines.append("✓ 已排 \(n) 条预排（挂起时的催命链，正常）")
+                lines.append("✗ 待发通知 \(n) 条（应 ≤ 1，对账失效）")
             }
 
             // 3. 通知授权
             NotificationPlanner.shared.authorizationStatus { s in
                 lines.append(s == "已允许" ? "✓ 通知权限已允许" : "✗ 通知权限：\(s)（会没声音）")
 
-                // 4. 计步 + 最近一个窗口的步数
+                // 4. 计步
                 lines.append(self.stepCountingAvailable ? "✓ 计步可用" : "✗ 设备不支持计步")
-                lines.append("· 最近 \(self.config.windowMinutes) 分钟 \(self.stepsInWindow) 步"
-                             + "（目标 \(self.config.targetSteps)）")
 
                 // 5. 环境（电量/充电/摘下）与暂停原因
                 let env = self.surroundings
@@ -588,7 +521,7 @@ final class WatchEngine: ObservableObject {
                 // 会话一断，就只能等用户点进来才知道已经走够。
                 let ext = ExtendedSessionManager.shared
                 if ext.isRunning {
-                    lines.append("✓ 常驻会话在跑（第 \(ext.segmentsStarted) 段，还能 \(ext.minutesLeftEstimate) 分钟）")
+                    lines.append("✓ 常驻会话在跑（第 \(ext.segmentsStarted) 段）")
                 } else {
                     let why = ext.lastEndReason.isEmpty ? "没启动" : ext.lastEndReason
                     lines.append("✗ 常驻会话没在跑：\(why)")

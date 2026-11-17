@@ -43,16 +43,12 @@ final class AppDelegate: NSObject, WKApplicationDelegate {
     }
 
     func applicationDidBecomeActive() {
-        // 回到前台：先记下来，再无条件对账 —— 从挂起回来时，内存和现实可能已经不一致
-        WatchEngine.shared.isForeground = true
+        // 无条件对账：从挂起回来时，内存和现实可能已经不一致
         WatchEngine.shared.tick(force: true)
     }
 
     func applicationWillResignActive() {
-        // 离开前把通知排好，这是挂起期间唯一能震手腕的东西。
-        // 必须先把标志置成 false：对账要靠它决定"排 1 条还是排满一条链"，
-        // 顺序反了就会只排 1 条，然后熄屏后彻底静默。
-        WatchEngine.shared.isForeground = false
+        // 离开前把通知排好，这是挂起期间唯一能震手腕的东西
         WatchEngine.shared.tick(force: true)
     }
 
