@@ -313,28 +313,16 @@ final class WatchEngine: ObservableObject {
             ? [.notification, .retry]
             : [.failure, .retry, .notification]
 
-        // 走哪条通道，取决于 App 现在是不是被看着：
-        //  · 前台 → 直接 play()，零延迟，不产生通知（界面上已经写着了）
-        //  · 后台/熄屏 → 走会话的 notifyUser：它会在后台震、并投递**一条**通知，
-        //    抬腕就能看到"起来走走"。play() 在后台会被静默丢掉，这就是
-        //    "熄屏后再也没震过"的直接原因。
-        //
-        // notifyUser 只能调一次：它每调一次就投一条通知，按序列调三次就是
-        // 三条通知连弹 —— 用户最烦的就是这个。第一记交给它，后面几记补 play()。
-        let inBackground = !isForeground
-        var sessionFired = false
-        if inBackground, let first = seq.first {
-            sessionFired = ExtendedSessionManager.shared.notifyUser(haptic: first)
-        }
+        // 触觉一旦成立就不用管前台后台：会话活着时进程没被挂起，
+        // `play()` 在后台同样震得动。真正让"熄屏就死"的不是 play 失效，
+        // 而是外面那个前台 Timer 停摆 —— 已换成后台队列的 GCD 计时器。
         for (i, h) in seq.enumerated() {
-            if i == 0 && sessionFired { continue }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7 * Double(i)) {
                 WKInterfaceDevice.current().play(h)
             }
         }
 
-        // 通知只需一条：会话在后台已经投了，就不再补 —— 两条会撞在一起。
-        if sessionFired { return }
+        // 通知只发一条，id 与兜底那条一致，内容由 NudgeText 统一生成。
         NotificationPlanner.shared.fireNow(
             body: NudgeText.reminder(
                 targetSteps: cfg.targetSteps,

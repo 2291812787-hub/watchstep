@@ -85,20 +85,6 @@ final class ExtendedSessionManager: NSObject, ObservableObject {
         restartWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
     }
-    /// 在会话里给一记触觉 —— 这是 Apple 给 self-care 会话的**后台提醒通道**。
-    ///
-    /// 为什么必须用它：`WKInterfaceDevice.play()` 只在 App 前台可靠。App 在后台
-    /// 时，haptic 可能被丢掉，也不会有任何界面提示；而
-    /// `notifyUser(hapticType:performNotificationWhenInBackground:)` 明确允许
-    /// 在后台运行期间震一下并投递通知。这正是「熄屏也按时催」的唯一官方手段。
-    ///
-    /// 返回 false 表示会话没在跑，调用方应退回播放器/预排通知那条路。
-    @discardableResult
-    func notifyUser(haptic: WKHapticType) -> Bool {
-        guard isRunning, let s = session else { return false }
-        s.notifyUser(hapticType: haptic, performNotificationWhenInBackground: true)
-        return true
-    }
 }
 
 extension ExtendedSessionManager: WKExtendedRuntimeSessionDelegate {
