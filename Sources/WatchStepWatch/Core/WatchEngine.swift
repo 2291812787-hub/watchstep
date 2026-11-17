@@ -30,6 +30,8 @@ final class WatchEngine: ObservableObject {
     @Published private(set) var selfCheckLog: [String] = []
 
     private var timer: Timer?
+    /// 后台计时器（GCD）。见 `startTicker`：不能靠前台 Timer。
+    private var backgroundTicker: DispatchSourceTimer?
     private var busy = false
     /// `busy` 是哪一刻置上的。用于卡死保护，见 `tick`。
     private var busySince: Date?
@@ -67,14 +69,41 @@ final class WatchEngine: ObservableObject {
         tick(force: true)
     }
 
-    /// 前台定时器：每 30 秒看一眼。真正的步数查询有缓存，不会打爆数据库。
+    /// 后台计时器：每 20 秒看一眼。
+    ///
+    /// **不能用 `Timer` + `RunLoop.main`。** 那是前台定时器：屏幕一黑、App 退到
+    /// 后台，系统就把进程挂起，RunLoop 不再转，Timer 一声不响地停掉 ——
+    /// 后台不查步数、不震、也不对账，用户抬腕看表盘更是完全碰不到它。
+    /// 等点开 App 时 `applicationDidBecomeActive` 才发现早就该催，于是把欠的
+    /// 提醒一次性补发出来。用户看到的"死后台 + 点进去一堆"就是这么来的。
+    ///
+    /// GCD 的 `DispatchSourceTimer` 挂在独立队列上，不依赖 RunLoop 的事件源。
+    /// 只要进程还活着（self-care 会话保的正是这个），它就照常滴答。
     private func startTicker() {
         timer?.invalidate()
-        let t = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+        backgroundTicker?.cancel()
+
+        let q = DispatchQueue(label: "watchstep.ticker", qos: .utility)
+        let t = DispatchSource.makeTimerSource(queue: q)
+        t.schedule(deadline: .now() + 20, repeating: 20, leeway: .seconds(3))
+        t.setEventHandler { [weak self] in
             self?.tick(force: false)
         }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        t.resume()
+        backgroundTicker = t
+
+        // 前台时再快一点，让界面数字跟得上；后台仍然靠上面那个 GCD 计时器。
+        let ui = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+            self?.refreshUIOnly()
+        }
+        RunLoop.main.add(ui, forMode: .common)
+        timer = ui
+    }
+
+    /// 只让界面重算显示，不查步数 —— 挪动数字的活儿交给后台计时器。
+    private func refreshUIOnly() {
+        guard isForeground else { return }
+        objectWillChange.send()
     }
 
     // MARK: - 主循环
@@ -121,14 +150,21 @@ final class WatchEngine: ObservableObject {
         let windowStart = RuleEngine.stepQueryStart(anchor: anchor, now: now, config: cfg)
         StepReader.shared.steps(from: windowStart, to: now) { [weak self] steps in
             guard let self = self else { return }
-            self.apply(steps: steps, anchor: anchor, now: now, cfg: cfg)
-            self.reconcileNotifications(steps: steps, anchor: anchor, now: Date(), cfg: cfg)
-            self.busy = false
-            self.busySince = nil
-            if self.pendingForce {
-                self.pendingForce = false
-                self.tick(force: true)
+            // 判定、震动、排通知都搬到主线程执行：tick 现在由后台队列的 GCD
+            // 计时器发起，而 `apply` 要更新 @Published（SwiftUI 只在主线程安全）。
+            // 注意这和 Timer 不是一回事：main queue 的块由 libdispatch 直接唤醒
+            // 主线程，后台照样会执行；停掉的只是 RunLoop 上的 Timer 事件源。
+            let run = {
+                self.apply(steps: steps, anchor: anchor, now: now, cfg: cfg)
+                self.reconcileNotifications(steps: steps, anchor: anchor, now: Date(), cfg: cfg)
+                self.busy = false
+                self.busySince = nil
+                if self.pendingForce {
+                    self.pendingForce = false
+                    self.tick(force: true)
+                }
             }
+            if Thread.isMainThread { run() } else { DispatchQueue.main.async(execute: run) }
         }
     }
 
@@ -276,15 +312,29 @@ final class WatchEngine: ObservableObject {
         let seq: [WKHapticType] = count < 3
             ? [.notification, .retry]
             : [.failure, .retry, .notification]
+
+        // 走哪条通道，取决于 App 现在是不是被看着：
+        //  · 前台 → 直接 play()，零延迟，不产生通知（界面上已经写着了）
+        //  · 后台/熄屏 → 走会话的 notifyUser：它会在后台震、并投递**一条**通知，
+        //    抬腕就能看到"起来走走"。play() 在后台会被静默丢掉，这就是
+        //    "熄屏后再也没震过"的直接原因。
+        //
+        // notifyUser 只能调一次：它每调一次就投一条通知，按序列调三次就是
+        // 三条通知连弹 —— 用户最烦的就是这个。第一记交给它，后面几记补 play()。
+        let inBackground = !isForeground
+        var sessionFired = false
+        if inBackground, let first = seq.first {
+            sessionFired = ExtendedSessionManager.shared.notifyUser(haptic: first)
+        }
         for (i, h) in seq.enumerated() {
+            if i == 0 && sessionFired { continue }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7 * Double(i)) {
                 WKInterfaceDevice.current().play(h)
             }
         }
 
-        // 只发一条：id 与兜底通知相同，正文由 NudgeText 统一生成。
-        // 以前这里另用"ws.now.<时间戳>"的 id，于是"该走了"和预排的"该走走了"
-        // 会几乎同时冒出来两条，还各说一半 —— 现在物理上不可能了。
+        // 通知只需一条：会话在后台已经投了，就不再补 —— 两条会撞在一起。
+        if sessionFired { return }
         NotificationPlanner.shared.fireNow(
             body: NudgeText.reminder(
                 targetSteps: cfg.targetSteps,
@@ -304,8 +354,8 @@ final class WatchEngine: ObservableObject {
     ///   · 其余所有情况（熄屏、挂起、会话死了）→ 一次排 6 条，
     ///     覆盖 30 分钟。挂起期间没有任何代码在跑，这是唯一能按时震响的手段。
     ///
-    /// 会话若还活着，它会 tick 到走够并 `fireNow()`，那一步会把整条链撤掉，
-    /// 所以预排的 6 条不会和实时震动叠加。
+    /// 会话若还活着，它 tick 到走够会 `fireNow()` 并撤掉这条预排，
+    /// 所以兜底通知不会和实时震动叠加。
     private func reconcileNotifications(steps: Int?, anchor: Date, now: Date, cfg: Config) {
         // 会话开关必须先算：下面每一条都是 early return，
         // 放在函数末尾就会被跳过 —— 一插上充电器那次 tick 正好命中第一个 guard，
@@ -361,7 +411,8 @@ final class WatchEngine: ObservableObject {
         // "点进去一堆通知"。密集提醒不能靠预排，只能靠 App 活着自己震。
         //
         // 所以分工是死的：
-        //   · 准点震手腕 = 常驻会话活着时每 30 秒 tick，到点 `play()`（同步、立即）
+        //   · 准点震手腕 = 常驻会话活着时每 20 秒 tick（后台队列），
+        //     到点走会话的 notifyUser（后台也震得动）
         //   · 这一条预排 = 会话万一死了的兜底，且只兜下一次，不兜一整天
         let slots = 1
 
