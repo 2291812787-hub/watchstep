@@ -4,8 +4,8 @@ import Foundation
 struct Config: Codable, Equatable {
     var enabled: Bool = true
     var targetSteps: Int = 200
-    var windowMinutes: Int = 30
-    var tickMinutes: Int = 5
+    var windowMinutes: Int = 3
+    var tickMinutes: Int = 1
     var startHour: Int = 8
     var endHour: Int = 22
     /// 走够时给一下轻确认（可关，关了完全不打扰）

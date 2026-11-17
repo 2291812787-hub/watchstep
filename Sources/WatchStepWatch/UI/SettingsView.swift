@@ -16,7 +16,7 @@ struct SettingsView: View {
                           range: 50...2000, step: 50) { engine.set(\.targetSteps, $0) }
 
                 numberRow("窗口", value: engine.config.windowMinutes, unit: "分",
-                          range: 10...120, step: 5) { engine.set(\.windowMinutes, $0) }
+                          range: 1...120, step: 1) { engine.set(\.windowMinutes, $0) }
 
                 numberRow("催命间隔", value: engine.config.tickMinutes, unit: "分",
                           range: 1...30, step: 1) { engine.set(\.tickMinutes, $0) }
