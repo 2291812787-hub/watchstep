@@ -41,4 +41,18 @@ enum RuleEngine {
     static func secondsUntilDeadline(anchor: Date, now: Date, config: Config) -> TimeInterval {
         deadline(anchor: anchor, config: config).timeIntervalSince(now)
     }
+
+    /// 查步数该从哪一刻起算 —— 这是「每 30 分钟 200 步」成立的前提。
+    ///
+    /// **绝不能从锚点一路累加。** 锚点要等"走够"才会推进，所以只要一直没在
+    /// 一个窗口内走够，[anchor, now] 就无限变长：坐一下午零散走出来的几百步，
+    /// 会被当成"30 分钟内走了 200 步"，于是每次打开 App 都误判成功 → 窗口重开
+    /// → 界面永远显示"刚好 30 分钟满格"，而且后台因为判了成功而全程不催。
+    ///
+    /// 起点取 max(锚点, now − 窗口)：最多只看最近一个窗口的长度。
+    /// 刚归零时锚点最近，从锚点算，窗口是干净的。
+    static func stepQueryStart(anchor: Date, now: Date, config: Config) -> Date {
+        let floor = now.addingTimeInterval(-config.window)
+        return anchor > floor ? anchor : floor
+    }
 }

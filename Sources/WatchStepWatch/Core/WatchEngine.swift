@@ -31,6 +31,16 @@ final class WatchEngine: ObservableObject {
 
     private var timer: Timer?
     private var busy = false
+    /// `busy` 是哪一刻置上的。用于卡死保护，见 `tick`。
+    private var busySince: Date?
+
+    /// 界面是否正亮着、正被看着。由 AppDelegate 的生命周期回调维护。
+    ///
+    /// 不直接问 `WKApplication.applicationState`：带着常驻运行时会话时，
+    /// 熄屏后那个值仍可能是 `.active`（会话本来就允许后台跑），拿它判断
+    /// "要不要多排几条"会永远排 1 条，等于把后台那条链彻底关掉。
+    /// 显式标志没有歧义：离开前台就是离开前台。
+    var isForeground: Bool = true
     private var pendingForce = false
     private var booted = false
 
@@ -70,6 +80,14 @@ final class WatchEngine: ObservableObject {
     // MARK: - 主循环
 
     func tick(force: Bool) {
+        // 卡死保护：正常查询 1 秒内就回来。超过 10 秒一定是回调丢了 ——
+        // 在挂起边缘发起查询、process 被冻住，completion 就永远不会来。
+        // 不解除的话 `busy` 永远为真，下面那句会让**之后每一次 tick 都被丢弃**，
+        // App 表现成"只有点进来才动一下"，然后一路静默到天荒地老。
+        if busy, let since = busySince, Date().timeIntervalSince(since) > 10 {
+            busy = false
+            busySince = nil
+        }
         if busy {
             // 已经在查了。force 的那次不能悄悄丢掉 —— 用户点进来这一刻的答案必须
             // 是准的，所以记一笔，等这一轮回来再补跑一次（串行，不并发）。
@@ -79,6 +97,7 @@ final class WatchEngine: ObservableObject {
             return
         }
         busy = true
+        busySince = Date()
         reloadConfig()
 
         let now = Date()
@@ -90,11 +109,22 @@ final class WatchEngine: ObservableObject {
         // 走够前的旧账，就会先发一条"起来走动"、再发一条"已满 200 步"。
         if force { StepReader.shared.invalidateCache() }
 
-        StepReader.shared.steps(from: anchor, to: now) { [weak self] steps in
+        // 查哪一段？**只查最近一个窗口，不能从锚点一路累加。**
+        //
+        // 以前查的是 [anchor, now]。锚点在下一次走够之前不会动，所以只要用户
+        // 一直没在 30 分钟内走够 200 步，这个区间就会无限变长：坐一下午累计
+        // 三五百步是常事，于是**打开的一瞬间必然 ≥ 200 → 判「走够」→ 归零**，
+        // 用户看到的就是"一打开刚好 30 分钟满格"。而那些步数是几小时里零散
+        // 走出来的，根本不是"30 分钟内走了 200 步"。
+        //
+        // 起点取 max(锚点, now - 窗口)，见 RuleEngine.stepQueryStart。
+        let windowStart = RuleEngine.stepQueryStart(anchor: anchor, now: now, config: cfg)
+        StepReader.shared.steps(from: windowStart, to: now) { [weak self] steps in
             guard let self = self else { return }
             self.apply(steps: steps, anchor: anchor, now: now, cfg: cfg)
             self.reconcileNotifications(steps: steps, anchor: anchor, now: Date(), cfg: cfg)
             self.busy = false
+            self.busySince = nil
             if self.pendingForce {
                 self.pendingForce = false
                 self.tick(force: true)
@@ -266,9 +296,16 @@ final class WatchEngine: ObservableObject {
         )
     }
 
-    // MARK: - 通知对账（关键）
-
-    /// 任何时刻：系统里最多一条待发通知，且它的时刻必须由当前锚点现算得出。
+    /// 任何时刻，系统里的待发通知都必须由当前锚点现算得出。
+    ///
+    /// 条数分两档，这是「后台静默」的正解：
+    ///   · 人在前台（常驻会话跑着、每 30 秒一次 tick）→ 只排 1 条，
+    ///     因为走够的那一刻我们会自己撤、自己震，排多了是噪音。
+    ///   · 其余所有情况（熄屏、挂起、会话死了）→ 一次排 6 条，
+    ///     覆盖 30 分钟。挂起期间没有任何代码在跑，这是唯一能按时震响的手段。
+    ///
+    /// 会话若还活着，它会 tick 到走够并 `fireNow()`，那一步会把整条链撤掉，
+    /// 所以预排的 6 条不会和实时震动叠加。
     private func reconcileNotifications(steps: Int?, anchor: Date, now: Date, cfg: Config) {
         // 会话开关必须先算：下面每一条都是 early return，
         // 放在函数末尾就会被跳过 —— 一插上充电器那次 tick 正好命中第一个 guard，
@@ -277,61 +314,65 @@ final class WatchEngine: ObservableObject {
             cfg.enabled && cfg.isActive(at: now) && quiet == nil
         )
 
-        // 充电 / 摘下时预排通知必须撤掉 —— 人不在状态上，弹了就是骚扰。
+        // 该彻底安静了：暂停（充电/摘下）、时段外、已走够。
         //
         // 但「电量低」绝不能撤。低电量是「该省电」的理由，不是「别提醒我」的理由；
         // 阈值 20% 是一天里很容易碰到的普通状态，一撤就等于整条提醒链静默，
         // 用户只会得到「它没响」——然后以为 App 坏了。这正是「通知被压」的元凶之一。
-        // 所以低电量只停常驻会话（省电的地方），兜底的那条通知留着。
+        // 所以低电量只停常驻会话（省电的地方），预排通知留着。
         let q = RuleEngine.quietReason(now: now, config: cfg, surroundings: surroundings)
         if let q = q, q != .lowBattery {
-            NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
-            pendingNotifications = 0
+            clearScheduled(now: now)
             return
         }
-
         guard cfg.isActive(at: now) else {
-            NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
-            pendingNotifications = 0
+            clearScheduled(now: now)
             return
         }
-
-        // 已走够 → 一条都不该留
         if let s = steps, s >= cfg.targetSteps {
-            NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
-            pendingNotifications = 0
+            clearScheduled(now: now)
             return
         }
 
         let deadline = RuleEngine.deadline(anchor: anchor, config: cfg)
+        let interval = TimeInterval(max(1, cfg.tickMinutes)) * 60
 
-        // 已在催命期：排在"上次催命 + 一个间隔"—— 也就是正文里承诺的那一刻。
-        // 以前排的是 2 个间隔，比嘴上说的晚一倍，用户会觉得"说好一分钟，结果没来"。
-        // 已经有更早的待发通知就沿用，避免每 30 秒的 tick 把它往后推。
-        let fire: Date
+        // 第一条排在哪儿？
+        //  · 窗口还没满 → 排在窗口到期那一刻（正文承诺的那个点）；
+        //  · 已在催命期 → 排在"上次催命 + 一个间隔"，也就是上一句说的是什么时候。
+        //    已经有更早的待发通知就沿用它，别每 30 秒往后推。
+        let first: Date
         if now >= deadline {
             if let p = NotificationPlanner.shared.nextFireAt, p > now {
-                fire = p
+                first = p
             } else {
                 let base = AnchorStore.shared.lastNudgeAt ?? now
-                let due = base.addingTimeInterval(cfg.tick)
                 // 已经错过了就 5 秒后补一条（比如刚从挂起/重启里醒来）
-                fire = max(due, now.addingTimeInterval(5))
+                first = max(base.addingTimeInterval(interval), now.addingTimeInterval(5))
             }
         } else {
-            // 窗口未满：排在窗口到期那一刻
-            fire = deadline
+            first = deadline
         }
 
-        // 坐着的分钟数按通知**真正弹出的时刻**（fire）现算，不按现在算 ——
+        // 覆盖 1 小时：12 条 × 5 分钟。
+        //
+        // 为什么不排一整天：预排通知进系统后**改不了也撤不回**（挂起时没有代码在跑）。
+        // 用户走够的那一刻若没人能撤，后面每一条都会照弹，那就成了「走够了还一直骂你」。
+        // 1 小时是权衡后的上限 —— 常驻会话自己还能再顶 1 小时，实际覆盖约 2 小时；
+        // 人只要中途抬腕点开一次，整条链就按真实进度重排了。
+        let slots = isForeground ? 1 : 12
+
+        // 坐着的分钟数按通知**真正弹出的时刻**现算，不按现在算 ——
         // 排程可能提前好几分钟，用 now 算会少报。
         NotificationPlanner.shared.replace(
-            fireAt: fire,
+            firstFire: first,
+            interval: interval,
+            slots: slots,
             now: now,
             body: NudgeText.reminder(
                 targetSteps: cfg.targetSteps,
                 steps: steps,
-                sittingMinutes: Int(fire.timeIntervalSince(anchor) / 60),
+                sittingMinutes: Int(first.timeIntervalSince(anchor) / 60),
                 tickMinutes: cfg.tickMinutes,
                 approximate: true          // 步数是排程时的快照，弹出时可能又走了几步
             )
@@ -340,6 +381,14 @@ final class WatchEngine: ObservableObject {
         NotificationPlanner.shared.pendingCount { [weak self] n in
             self?.pendingNotifications = n
         }
+    }
+
+    /// 撤掉所有待发通知，并把界面上的条数清零。
+    private func clearScheduled(now: Date) {
+        NotificationPlanner.shared.replace(
+            firstFire: nil, interval: 0, slots: 1, now: now, body: ""
+        )
+        pendingNotifications = 0
     }
 
     // MARK: - 对外操作
@@ -459,18 +508,22 @@ final class WatchEngine: ObservableObject {
         NotificationPlanner.shared.pendingCount { [weak self] n in
             guard let self = self else { return }
             var lines = log
-            if n <= 1 {
-                lines.append("✓ 待发通知 \(n) 条")
+            if n == 0 {
+                lines.append("✓ 无待发通知")
+            } else if n == 1 {
+                lines.append("✓ 待发通知 1 条")
             } else {
-                lines.append("✗ 待发通知 \(n) 条（应 ≤ 1，对账失效）")
+                lines.append("✓ 已排 \(n) 条预排（挂起时的催命链，正常）")
             }
 
             // 3. 通知授权
             NotificationPlanner.shared.authorizationStatus { s in
                 lines.append(s == "已允许" ? "✓ 通知权限已允许" : "✗ 通知权限：\(s)（会没声音）")
 
-                // 4. 计步
+                // 4. 计步 + 最近一个窗口的步数
                 lines.append(self.stepCountingAvailable ? "✓ 计步可用" : "✗ 设备不支持计步")
+                lines.append("· 最近 \(self.config.windowMinutes) 分钟 \(self.stepsInWindow) 步"
+                             + "（目标 \(self.config.targetSteps)）")
 
                 // 5. 环境（电量/充电/摘下）与暂停原因
                 let env = self.surroundings

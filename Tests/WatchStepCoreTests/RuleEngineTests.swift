@@ -187,4 +187,43 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertTrue(hasNudged)
         XCTAssertFalse(silentAfterNudge, "开始催之后不许退回静默")
     }
+
+    // MARK: - 回归：查询区间不能无限累加
+
+    /// 锚点停在 3 小时前（一直没走够），查询起点必须只回看一个窗口。
+    /// 否则 3 小时里零散走的 400 步会被当成"30 分钟走了 200 步"，
+    /// 打开 App 立刻误判成功、窗口重开 —— 用户看到的就是"一打开刚好 30 分钟"。
+    func testQueryStartNeverLooksBackMoreThanOneWindow() {
+        let now = date(hour: 17, minute: 0)
+        let anchor = now.addingTimeInterval(-3 * 3600)
+        let start = RuleEngine.stepQueryStart(anchor: anchor, now: now, config: cfg)
+        XCTAssertEqual(start, now.addingTimeInterval(-30 * 60))
+        XCTAssertLessThanOrEqual(now.timeIntervalSince(start), 30 * 60 + 0.001)
+    }
+
+    /// 刚归零时锚点比窗口起点更近，从锚点算 —— 新窗口从零开始。
+    func testQueryStartUsesAnchorWhenWithinWindow() {
+        let now = date(hour: 14, minute: 20)
+        let anchor = date(hour: 14, minute: 10)
+        XCTAssertEqual(RuleEngine.stepQueryStart(anchor: anchor, now: now, config: cfg), anchor)
+    }
+
+    /// 锚点正好等于窗口边界时也算一个完整窗口。
+    func testQueryStartAtExactWindowBoundary() {
+        let now = date(hour: 14, minute: 30)
+        let anchor = date(hour: 14, minute: 0)
+        XCTAssertEqual(RuleEngine.stepQueryStart(anchor: anchor, now: now, config: cfg), anchor)
+    }
+
+    /// 坐一下午：累计 400 步但最近 30 分钟只有 50 步 —— 必须判"该催"，不许判走够。
+    func testLongIdleWithCumulativeStepsStillNudges() {
+        let now = date(hour: 17, minute: 0)
+        let anchor = now.addingTimeInterval(-3 * 3600)
+        // 从早先的累计里"看到" 400 步是错的；正确起点只看最近 30 分钟 = 50 步
+        let recentSteps = 50
+        XCTAssertEqual(
+            RuleEngine.decide(anchor: anchor, steps: recentSteps, now: now, config: cfg),
+            .nudge
+        )
+    }
 }
