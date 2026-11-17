@@ -442,6 +442,10 @@ final class WatchEngine: ObservableObject {
         let anchor = AnchorStore.shared.anchor
         let idle = now.timeIntervalSince(anchor)
 
+        // 0. 构建标识放在最前面：装上之后第一眼就能确认跑的是哪个包。
+        //    以前三个包的 CFBundleVersion 全是 1.0(1)，装了旧包也看不出来。
+        log.append("构建 \(BuildInfo.stamp)")
+
         // 1. 锚点合理性：不该在未来，也不该比"窗口 + 1 小时"还久（除非整天没开）
         if anchor > now.addingTimeInterval(60) {
             log.append("✗ 锚点在未来（时钟跳变？）")

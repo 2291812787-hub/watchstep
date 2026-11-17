@@ -53,6 +53,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: 安装 XcodeGen
         run: brew install xcodegen
+      - name: 写入构建标识
+        run: |
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          cat > Sources/WatchStepCore/BuildInfo.swift <<EOF
+          enum BuildInfo {
+              /// 由 CI 在编译前写入：短提交号 + 构建序号。
+              static let stamp = "v9-${SHA}-${{ github.run_number }}"
+              static let sha = "${SHA}"
+          }
+          EOF
+          cat Sources/WatchStepCore/BuildInfo.swift
       - name: 生成工程
         run: xcodegen generate
       - name: 编译
