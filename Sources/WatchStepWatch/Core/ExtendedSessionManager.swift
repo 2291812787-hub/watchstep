@@ -105,7 +105,6 @@ extension ExtendedSessionManager: WKExtendedRuntimeSessionDelegate {
         consecutiveFailures = 0
         segmentsStarted += 1
         lastEndReason = ""
-        startedAt = Date()
         segmentStartedAt = Date()
         // 会话上限约 1 小时，且 Apple 只允许在前台启动它 —— 到期后自己回不来。
         // 提前 10 分钟吭一声，用户点一下就能续上；不吭声就等于"悄悄死掉"。
