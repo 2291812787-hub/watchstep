@@ -105,7 +105,7 @@ final class NotificationPlanner {
             content.body = body
             content.sound = .default
             // 同一组，便于系统合并展示；也方便将来整体清掉
-            content.threadIdentifier = "watchstep.nudge"
+            content.threadIdentifier = "watchstep.nudge.live"
 
             let trigger = UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
             requests.append(UNNotificationRequest(identifier: Self.id(i),
@@ -131,7 +131,7 @@ final class NotificationPlanner {
         content.title = title
         content.body = body
         content.sound = .default
-        content.threadIdentifier = "watchstep.nudge"
+        content.threadIdentifier = "watchstep.nudge.live"
 
         let request = UNNotificationRequest(identifier: Self.id(0), content: content, trigger: nil)
         center.add(request, withCompletionHandler: nil)
