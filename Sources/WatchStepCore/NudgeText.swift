@@ -25,14 +25,20 @@ enum NudgeText {
         let every = everyText(tickMinutes: tickMinutes)
 
         guard let s = steps else {
-            return "还没走到 \(target) 步 · 已坐 \(sit) 分钟，\(every)。"
+            return "该走走了 · 已坐 \(sit) 分钟，\(every)。"
+        }
+        // 预排通知进系统之后内容就改不了了。它的步数是排程那一刻的快照，
+        // 等它真弹出来时用户可能早就走够了 —— 这时写"还差约 137 步"就是在
+        // 打自己的脸（用户正看着 200 步的界面）。所以预排版干脆只讲
+        // 完全确定的事实：坐多久了、多久后再提。差多少步交给即时通知去讲。
+        if approximate {
+            return "该走走了 · 已坐 \(sit) 分钟，\(every)。"
         }
         let remain = max(0, target - s)
         if remain == 0 {
             return "已满 \(target) 步，重新开始计时。"
         }
-        let hint = approximate ? "还差约 \(remain) 步" : "还差 \(remain) 步"
-        return "\(hint) · 已坐 \(sit) 分钟，\(every)。"
+        return "还差 \(remain) 步 · 已坐 \(sit) 分钟，\(every)。"
     }
 
     /// "1 分钟后再提醒你一次" / "5 分钟后再提醒你一次"

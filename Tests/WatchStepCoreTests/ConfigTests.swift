@@ -54,7 +54,8 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(c.windowMinutes, 30, "旧存档必须被丢弃，回正式默认值")
         XCTAssertEqual(c.tickMinutes, 5)
         XCTAssertEqual(c.startHour, 8)
-        XCTAssertEqual(c.configVersion, 2)
+        XCTAssertEqual(c.configVersion, Config().configVersion,
+                       "解码失败时整份回到本版默认值，版本号自然等于本版")
     }
 
     /// 本版存下去的存档要能原样读回（否则每次启动都被重置，用户改的东西全白改）。

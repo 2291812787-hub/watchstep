@@ -21,7 +21,21 @@ struct Config: Codable, Equatable {
     /// 换回正式版不该继续沿用 3/1。
     ///
     /// 以后每次改默认值，把它 +1 即可；不要把它存进 UI 可编辑的字段。
-    var configVersion: Int = 2
+    var configVersion: Int = 3
+
+    // MARK: 什么情况下别打扰
+
+    /// 插着充电线时不催。充电基本等于「人不在走」，而且这时候催最烦。
+    var pauseWhileCharging: Bool = true
+
+    /// 手表摘下来（已上锁）时不催。手腕检测关掉或没设密码时这条不生效。
+    var pauseOffWrist: Bool = true
+
+    /// 电量低于 lowBatteryPercent 时不催，省着点电。
+    var pauseOnLowBattery: Bool = true
+
+    /// 低电量阈值（百分比）。
+    var lowBatteryPercent: Int = 20
 
     var window: TimeInterval { TimeInterval(max(1, windowMinutes) * 60) }
     var tick: TimeInterval { TimeInterval(max(1, tickMinutes) * 60) }

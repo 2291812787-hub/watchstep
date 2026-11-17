@@ -19,6 +19,7 @@ final class AnchorStore {
         static let day = "ws.day"
         static let nudgesToday = "ws.nudgesToday"
         static let longestIdle = "ws.longestIdle"
+        static let lastTickAt = "ws.lastTickAt"
     }
 
     // MARK: - 锚点
@@ -61,6 +62,17 @@ final class AnchorStore {
         set {
             if let v = newValue { d.set(v, forKey: K.lastNudgeAt) }
             else { d.removeObject(forKey: K.lastNudgeAt) }
+        }
+    }
+
+    /// 上一次真正跑判定的时刻。
+    /// 用来自检「中间是不是断了很久」——手表关机两天再开，
+    /// 锚点是两天前，照用的话一戴就立刻挨催。
+    var lastTickAt: Date? {
+        get { d.object(forKey: K.lastTickAt) as? Date }
+        set {
+            if let v = newValue { d.set(v, forKey: K.lastTickAt) }
+            else { d.removeObject(forKey: K.lastTickAt) }
         }
     }
 

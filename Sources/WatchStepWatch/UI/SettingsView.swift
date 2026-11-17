@@ -32,6 +32,31 @@ struct SettingsView: View {
                     set: { v in engine.update { $0.confirmHapticOnReset = v } }
                 ))
 
+                Divider().padding(.vertical, 2)
+                Text("别打扰我")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Toggle("充电中不催", isOn: Binding(
+                    get: { engine.config.pauseWhileCharging },
+                    set: { v in engine.update { $0.pauseWhileCharging = v } }
+                ))
+
+                Toggle("摘下时不催", isOn: Binding(
+                    get: { engine.config.pauseOffWrist },
+                    set: { v in engine.update { $0.pauseOffWrist = v } }
+                ))
+
+                Toggle("电量低不催", isOn: Binding(
+                    get: { engine.config.pauseOnLowBattery },
+                    set: { v in engine.update { $0.pauseOnLowBattery = v } }
+                ))
+
+                if engine.config.pauseOnLowBattery {
+                    numberRow("低电阈值", value: engine.config.lowBatteryPercent, unit: "%",
+                              range: 5...50, step: 5) { engine.set(\.lowBatteryPercent, $0) }
+                }
+
                 Button("本轮立即归零") { engine.resetNow() }
                     .foregroundStyle(.orange)
 

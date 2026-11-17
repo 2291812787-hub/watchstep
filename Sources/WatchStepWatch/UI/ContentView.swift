@@ -54,18 +54,26 @@ struct ContentView: View {
 
     // MARK: - 三档状态（验收第 10 条：不许出现会走错的数字）
 
+    @ViewBuilder
     private func statusBadge(_ date: Date) -> some View {
-        let lvl = engine.level(at: date)
-        let (text, color): (String, Color) = {
-            switch lvl {
-            case .ok: return ("正常", .green)
-            case .soon: return ("快到了", .yellow)
-            case .overdue: return ("该动了", .red)
-            case .off: return ("已关闭", .gray)
+        if let q = engine.quiet {
+            // 暂停原因比"正常"重要：充电时显示"正常"等于骗人
+            badge(q.label, q == .outsideWindow ? .gray : .orange)
+        } else if !engine.config.enabled {
+            badge("已关闭", .gray)
+        } else {
+            switch engine.level(at: date) {
+            case .ok:      badge("正常", .green)
+            case .soon:    badge("快到了", .yellow)
+            case .overdue: badge("该动了", .red)
+            case .off:     badge("已关闭", .gray)
             }
-        }()
-        return Text(text)
-            .font(.system(size: 13, weight: .semibold))
+        }
+    }
+
+    private func badge(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(color)
     }
 

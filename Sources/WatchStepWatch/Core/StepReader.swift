@@ -29,12 +29,17 @@ final class StepReader {
             return
         }
 
-        // 同一锚点、且只往前挪了一点点，直接用缓存，避免同一秒内多次查询打数据库
+        // 同一锚点、且只往前挪了一点点，直接用缓存，避免同一秒内多次查询打数据库。
+        //
+        // 窗口必须短。以前是 45 秒 —— 比一轮 tick（30 秒）还长，于是「走够 200 步
+        // 之后点进来」这次查询拿到的仍是走够前的旧账：先判成"该催"发一条，
+        // 下一轮读到真值再发"走够了"，用户手腕上就是两条互相打脸的通知。
+        // 5 秒足够挡掉同一次 tick 里的重复查询，又不会把旧账带进新判定。
         lock.lock()
         if let v = cachedValue, let f = cachedFrom, let t = cachedTo,
            abs(f.timeIntervalSince(from)) < 1.0,
            to >= t,
-           to.timeIntervalSince(t) < 45.0 {
+           to.timeIntervalSince(t) < 5.0 {
             lock.unlock()
             completion(v)
             return

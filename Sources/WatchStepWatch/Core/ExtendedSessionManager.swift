@@ -21,6 +21,10 @@ final class ExtendedSessionManager: NSObject, ObservableObject {
     private var session: WKExtendedRuntimeSession?
     private var wantRunning = false
     private var restartWorkItem: DispatchWorkItem?
+    /// 连续失败次数（成功启动即清零）。以前用 `segmentsStarted` 判断退避，
+    /// 那是一辈子只增不减的累计值 —— 跑满 7 段之后，每次失败都固定等 2 分钟，
+    /// 后台一断就再也接不上。
+    private var consecutiveFailures = 0
 
     private override init() { super.init() }
 
@@ -35,6 +39,22 @@ final class ExtendedSessionManager: NSObject, ObservableObject {
         s.delegate = self
         session = s
         s.start()
+
+        // 看门狗：系统有时既不回 didStart 也不回 didInvalidate（当时不在前台、
+        // 或会话额度被拒、或正在充电）。这一挂，session 就永远非 nil，
+        // 上面那句 `session == nil` 从此永远不成立 —— 会话再也不会起来，
+        // 后台判定整段瘫痪，「走够了立刻停催」就永远做不到。
+        // 30 秒没落地就当没起来，清掉重排。
+        let watchdog = DispatchWorkItem { [weak self, weak s] in
+            guard let self = self, let s = s else { return }
+            guard self.session === s, !self.isRunning else { return }
+            s.invalidate()
+            self.session = nil
+            self.consecutiveFailures += 1
+            self.lastEndReason = "启动超时"
+            self.scheduleRestart(after: 15)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: watchdog)
     }
 
     func stop() {
@@ -60,7 +80,9 @@ final class ExtendedSessionManager: NSObject, ObservableObject {
 extension ExtendedSessionManager: WKExtendedRuntimeSessionDelegate {
 
     func extendedRuntimeSessionDidStart(_ extendedRuntimeSession: WKExtendedRuntimeSession) {
+        guard extendedRuntimeSession === session else { return }
         isRunning = true
+        consecutiveFailures = 0
         segmentsStarted += 1
         lastEndReason = ""
         // 会话一起就跑一次判定，把状态立刻对齐现实
@@ -68,7 +90,10 @@ extension ExtendedSessionManager: WKExtendedRuntimeSessionDelegate {
     }
 
     func extendedRuntimeSessionWillExpire(_ extendedRuntimeSession: WKExtendedRuntimeSession) {
-        // 到期前把通知排好，接着尝试续一段
+        // 只有「当前这个」会话的回调才作数。旧会话被 stop() 之后回调是异步回来的，
+        // 若不加这层身份判断，它会把刚起的新会话当成自己已经结束 —— 新会话的
+        // 状态被写死成没在跑，引用也被清掉，从此再也起不来。
+        guard extendedRuntimeSession === session else { return }
         DispatchQueue.main.async { WatchEngine.shared.tick(force: true) }
         isRunning = false
         lastEndReason = "到期"
@@ -80,10 +105,13 @@ extension ExtendedSessionManager: WKExtendedRuntimeSessionDelegate {
         didInvalidateWith reason: WKExtendedRuntimeSessionInvalidationReason,
         error: (any Error)?
     ) {
+        guard extendedRuntimeSession === session else { return }
         isRunning = false
         lastEndReason = error?.localizedDescription ?? "被系统结束(reason \(reason.rawValue))"
-        // 连续被拒时不要死磕（会有 'too many sessions' 之类的限流），退避到 2 分钟
-        let backoff: TimeInterval = segmentsStarted > 6 ? 120 : 15
+        consecutiveFailures += 1
+        // 真正连续被拒（'too many sessions' 之类限流）才退避到 2 分钟，
+        // 否则 15 秒就重来 —— 后台断线要尽快接上，接不上就等于「走够了也不吭声」。
+        let backoff: TimeInterval = consecutiveFailures > 4 ? 120 : 15
         scheduleRestart(after: backoff)
     }
 }

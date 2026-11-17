@@ -21,11 +21,17 @@ final class WatchEngine: ObservableObject {
     @Published private(set) var stepCountingAvailable: Bool = StepReader.shared.isAvailable
     @Published private(set) var lastError: String = ""
 
+    /// 此刻为什么没在催（充电/摘下/低电/时段外）。nil = 一切正常。
+    @Published private(set) var quiet: QuietReason?
+    /// 最近一次读到的环境，界面直接显示。
+    @Published private(set) var surroundings: Surroundings = .unknown
+
     /// 自检结果（验收用）
     @Published private(set) var selfCheckLog: [String] = []
 
     private var timer: Timer?
     private var busy = false
+    private var pendingForce = false
     private var booted = false
 
     private init() {
@@ -64,32 +70,89 @@ final class WatchEngine: ObservableObject {
     // MARK: - 主循环
 
     func tick(force: Bool) {
-        if busy && !force { return }
+        if busy {
+            // 已经在查了。force 的那次不能悄悄丢掉 —— 用户点进来这一刻的答案必须
+            // 是准的，所以记一笔，等这一轮回来再补跑一次（串行，不并发）。
+            // 以前 force 会直接并行进来，两次查询的回调互相覆盖 stepsInWindow，
+            // 于是同一秒里先得 195 再得 200 —— 这也是"两条通知先后到"的帮凶。
+            if force { pendingForce = true }
+            return
+        }
         busy = true
         reloadConfig()
 
         let now = Date()
-        let anchor = AnchorStore.shared.anchor
         let cfg = config
+        let anchor = saneAnchor(now: now, cfg: cfg)
+
+        // force 的语义就是「现在到底怎样」：用户点进来、回到前台、后台任务醒来、
+        // 常驻会话启动。这种时刻绝不能拿缓存回答 —— 刚走够 200 步点进来却读到
+        // 走够前的旧账，就会先发一条"起来走动"、再发一条"已满 200 步"。
+        if force { StepReader.shared.invalidateCache() }
 
         StepReader.shared.steps(from: anchor, to: now) { [weak self] steps in
             guard let self = self else { return }
             self.apply(steps: steps, anchor: anchor, now: now, cfg: cfg)
             self.reconcileNotifications(steps: steps, anchor: anchor, now: Date(), cfg: cfg)
             self.busy = false
+            if self.pendingForce {
+                self.pendingForce = false
+                self.tick(force: true)
+            }
         }
     }
 
     // MARK: - 应用判定
 
+    /// 锚点校准。锚点是「上次走够 200 步的时刻」，但它会被三件事搞坏，
+    /// 不修就会变成「一戴上手表就立刻挨骂」。
+    private func saneAnchor(now: Date, cfg: Config) -> Date {
+        let stored = AnchorStore.shared.anchor
+
+        // 1) 锚点落在将来：调过系统时间或换了时区。照用的话永远不催。
+        if stored > now {
+            AnchorStore.shared.reset(to: now)
+            return now
+        }
+
+        // 2) 断了六个小时以上：只可能是关机或彻底没电。
+        //    注意不能用「一小时没被唤醒」当依据 —— CMPedometer 是系统级记账，
+        //    App 睡着的时候步数照样在记，那时候重置反而把真实进度抹掉。
+        if let last = AnchorStore.shared.lastTickAt,
+           now.timeIntervalSince(last) > 6 * 3600 {
+            AnchorStore.shared.reset(to: now)
+            return now
+        }
+
+        // 3) 刚跨进生效时段：昨天夜里攒的空档不该在早上 8:00 立刻兑现。
+        //    把锚点抬到时段起点，于是 8:00 一开门就有完整的一个窗口。
+        if let start = RuleEngine.windowStart(now: now, config: cfg), stored < start {
+            AnchorStore.shared.anchor = start
+            return start
+        }
+
+        return stored
+    }
+
     private func apply(steps: Int?, anchor: Date, now: Date, cfg: Config) {
         lastCheckAt = now
         lastError = ""
 
+        // 每轮都读一次真实环境：电量、是否插电、是否已摘下。
+        // 这些是「此刻该不该吵」的唯一依据，界面也拿它显示。
+        let env = SurroundingsReader.read()
+        surroundings = env
+        AnchorStore.shared.lastTickAt = now
+
+        // 一次算清「此刻该不该吵」，后面所有分支共用，界面也读它。
+        // 必须放在步数 guard **之前**：读不到步数时界面照样要显示
+        // 「充电中，暂停」，留一个上一轮的旧值会显示成「正常」——那是骗人。
+        quiet = RuleEngine.quietReason(now: now, config: cfg, surroundings: env)
+
         guard let steps = steps else {
             lastDecision = .unknown
             lastError = stepCountingAvailable ? "读不到步数（运动权限？）" : "这台设备不支持计步"
-            // 读不到时也要把通知排上，否则会完全静默失效
+            // 读不到也要继续走通知对账（外面会调），否则会完全静默失效
             return
         }
 
@@ -100,14 +163,27 @@ final class WatchEngine: ObservableObject {
         switch decision {
         case .satisfied:
             let wasNudging = AnchorStore.shared.isNudging
+
+            // 挂起期间那条预排的"起来走动"可能已经被系统弹出来了（它的步数是
+            // 排程时的快照，现在可能是错的）。先认账、再从通知中心撤掉，
+            // 然后只发一条正确的 —— 用户不会看到"先催命、后说走够"这种自打嘴巴。
+            let delivered = NotificationPlanner.shared.consumeDelivered(now: now)
+            if let d = delivered {
+                AnchorStore.shared.lastNudgeAt = d
+                AnchorStore.shared.nudgesToday += 1
+            }
+            NotificationPlanner.shared.cancelAll()
+
             AnchorStore.shared.reset(to: now)
             StepReader.shared.invalidateCache()
-            if wasNudging || cfg.confirmHapticOnReset {
+            if wasNudging || delivered != nil || cfg.confirmHapticOnReset {
                 WKInterfaceDevice.current().play(.success)
             }
             // 「达成」也要有可见的反馈。否则用户只感到一震、屏幕上什么都没有，
-            // 分不清是走够了还是又催一次。只在真的催过之后才提示，避免干扰。
-            if wasNudging {
+            // 分不清是走够了还是又催一次。
+            // 条件不能只看 wasNudging：App 挂起时是那条预排通知替我们催的，
+            // 此时 nudgingSince 仍是 nil，但用户确实已经被催过了 —— 漏掉他更困惑。
+            if wasNudging || delivered != nil {
                 NotificationPlanner.shared.fireNow(
                     body: "已满 \(cfg.targetSteps) 步，重新开始计时",
                     title: "走够了",
@@ -117,6 +193,23 @@ final class WatchEngine: ObservableObject {
             nudgesToday = AnchorStore.shared.nudgesToday
 
         case .nudge:
+            // 环境不对就别吵：充电、摘下。暂停不能让锚点永远停在很久以前 ——
+            // 一充满电、一戴回手腕就立刻催，那才是最烦的。所以暂停期间锚点跟着走，
+            // 恢复后重新给一个完整窗口。
+            //
+            // 低电量不在此列：它只让常驻会话别起（省电），提醒本身照旧。
+            // 电量 20% 就静默，等于一天里有一大段时间 App 假装自己不存在。
+            if let q = quiet, q != .lowBattery {
+                AnchorStore.shared.nudgingSince = nil
+                AnchorStore.shared.lastNudgeAt = nil
+                NotificationPlanner.shared.cancelAll()
+                if now.timeIntervalSince(anchor) >= cfg.window {
+                    AnchorStore.shared.anchor = now
+                }
+                nudgesToday = AnchorStore.shared.nudgesToday
+                break
+            }
+
             if AnchorStore.shared.nudgingSince == nil {
                 AnchorStore.shared.nudgingSince = now
             }
@@ -177,6 +270,26 @@ final class WatchEngine: ObservableObject {
 
     /// 任何时刻：系统里最多一条待发通知，且它的时刻必须由当前锚点现算得出。
     private func reconcileNotifications(steps: Int?, anchor: Date, now: Date, cfg: Config) {
+        // 会话开关必须先算：下面每一条都是 early return，
+        // 放在函数末尾就会被跳过 —— 一插上充电器那次 tick 正好命中第一个 guard，
+        // 会话没释放，人却在充电，白耗电。
+        ExtendedSessionManager.shared.setDesired(
+            cfg.enabled && cfg.isActive(at: now) && quiet == nil
+        )
+
+        // 充电 / 摘下时预排通知必须撤掉 —— 人不在状态上，弹了就是骚扰。
+        //
+        // 但「电量低」绝不能撤。低电量是「该省电」的理由，不是「别提醒我」的理由；
+        // 阈值 20% 是一天里很容易碰到的普通状态，一撤就等于整条提醒链静默，
+        // 用户只会得到「它没响」——然后以为 App 坏了。这正是「通知被压」的元凶之一。
+        // 所以低电量只停常驻会话（省电的地方），兜底的那条通知留着。
+        let q = RuleEngine.quietReason(now: now, config: cfg, surroundings: surroundings)
+        if let q = q, q != .lowBattery {
+            NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
+            pendingNotifications = 0
+            return
+        }
+
         guard cfg.isActive(at: now) else {
             NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
             pendingNotifications = 0
@@ -227,9 +340,6 @@ final class WatchEngine: ObservableObject {
         NotificationPlanner.shared.pendingCount { [weak self] n in
             self?.pendingNotifications = n
         }
-
-        // 会话开关：只在生效时段内占电，时段外一律释放。
-        ExtendedSessionManager.shared.setDesired(cfg.enabled && cfg.isActive(at: now))
     }
 
     // MARK: - 对外操作
@@ -243,10 +353,22 @@ final class WatchEngine: ObservableObject {
     }
 
     func update(_ mutate: (inout Config) -> Void) {
+        let wasEnabled = config.enabled
         var c = config
         mutate(&c)
         c.save()
         config = c
+
+        // 关掉时把系统里已经排好的那条一并撤掉，否则关完还会弹一次。
+        if wasEnabled && !c.enabled {
+            NotificationPlanner.shared.cancelAll()
+        }
+        // 重新打开不该当场就震：锚点可能停在几小时前，一开就是「已经坐了 4 小时」。
+        // 给一个完整的新窗口。
+        if !wasEnabled && c.enabled {
+            AnchorStore.shared.reset(to: Date())
+        }
+
         StepReader.shared.invalidateCache()
         tick(force: true)
     }
@@ -285,6 +407,10 @@ final class WatchEngine: ObservableObject {
 
     func level(at date: Date) -> Level {
         guard config.isActive(at: date) else { return .off }
+        // 暂停中（充电/摘下）不要显示成「该动了」—— 那时我们本来就不催。
+        // 但低电量不算暂停：它只是不开常驻会话省电，通知照弹，
+        // 界面要是也写成「暂停」，用户看到的就是一个自相矛盾的 App。
+        if let q = quiet, q != .outsideWindow, q != .lowBattery { return .ok }
         let remain = secondsRemaining(at: date)
         if remain <= 0 { return .overdue }
         if remain <= 5 * 60 { return .soon }
@@ -292,6 +418,13 @@ final class WatchEngine: ObservableObject {
     }
 
     func levelText(at date: Date) -> String {
+        if let q = quiet, q != .lowBattery {
+            switch q {
+            case .disabled:      return "已关闭"
+            case .outsideWindow: return "不在时段"
+            default:             return q.label
+            }
+        }
         switch level(at: date) {
         case .ok: return "正常"
         case .soon: return "快到了"
@@ -335,22 +468,47 @@ final class WatchEngine: ObservableObject {
                 // 4. 计步
                 lines.append(self.stepCountingAvailable ? "✓ 计步可用" : "✗ 设备不支持计步")
 
-                // 5. 当前判定
-                lines.append("· 当前判定：\(self.describe(self.lastDecision))，窗口内 \(self.stepsInWindow) 步")
+                // 5. 环境（电量/充电/摘下）与暂停原因
+                let env = self.surroundings
+                let b = env.batteryPercent >= 0 ? "\(env.batteryPercent)%" : "读不到"
+                var flags: [String] = []
+                if env.charging { flags.append("充电中") }
+                if env.offWrist { flags.append("已摘下") }
+                if env.lowPowerMode { flags.append("低电量模式") }
+                let fs = flags.isEmpty ? "" : "（\(flags.joined(separator: "、"))）"
+                lines.append("· 电量 \(b)\(fs)")
+                if let q = self.quiet {
+                    lines.append("· 判定：暂停（\(q.label)），不会震动")
+                } else {
+                    lines.append("· 判定：会按点催")
+                }
                 lines.append("· 生效时段：\(self.config.startHour):00–\(self.config.endHour):00")
+
+                // 6. 后台能不能真的跑起来 —— 这决定「走够就立刻确认」成不成立。
+                // 挂起时手表不给步数变化的回调，只能靠常驻会话自己醒着去查；
+                // 会话一断，就只能等用户点进来才知道已经走够。
+                let ext = ExtendedSessionManager.shared
+                if ext.isRunning {
+                    lines.append("✓ 常驻会话在跑（第 \(ext.segmentsStarted) 段）")
+                } else {
+                    let why = ext.lastEndReason.isEmpty ? "没启动" : ext.lastEndReason
+                    lines.append("✗ 常驻会话没在跑：\(why)")
+                }
+                if let last = self.lastCheckAt {
+                    let age = Int(now.timeIntervalSince(last))
+                    lines.append(age < 120 ? "· 上次检查 \(age) 秒前"
+                                           : "⚠ 上次检查 \(age / 60) 分钟前（后台被挂起了）")
+                }
+                if let p = NotificationPlanner.shared.nextFireAt {
+                    let d = Int(p.timeIntervalSince(now))
+                    lines.append(d >= 0 ? "· 待发通知 \(d) 秒后" : "· 待发通知已过期 \((-d) 秒)")
+                } else {
+                    lines.append("· 无待发通知")
+                }
 
                 self.selfCheckLog = lines
             }
         }
     }
 
-    private func describe(_ d: Decision) -> String {
-        switch d {
-        case .inactive: return "不在时段"
-        case .satisfied: return "已走够"
-        case .waiting: return "计时中"
-        case .nudge: return "该催"
-        case .unknown: return "读不到步数"
-        }
-    }
 }
