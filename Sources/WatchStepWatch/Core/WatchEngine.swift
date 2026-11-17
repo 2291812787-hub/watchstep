@@ -501,7 +501,11 @@ final class WatchEngine: ObservableObject {
                 }
                 if let p = NotificationPlanner.shared.nextFireAt {
                     let d = Int(p.timeIntervalSince(now))
-                    lines.append(d >= 0 ? "· 待发通知 \(d) 秒后" : "· 待发通知已过期 \((-d) 秒)")
+                    if d >= 0 {
+                        lines.append("· 待发通知 " + String(d) + " 秒后")
+                    } else {
+                        lines.append("· 待发通知已过期 " + String(-d) + " 秒")
+                    }
                 } else {
                     lines.append("· 无待发通知")
                 }
