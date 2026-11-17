@@ -8,6 +8,12 @@ on:
 permissions:
   contents: write
 
+# 排队中的旧 run 会被同一 workflow 的新 run 顶掉，macOS runner 尤其明显。
+# 关掉并发取消，保证每个提交都真的编译过；同时避免 report 分支被并发写坏。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     name: 逻辑测试
