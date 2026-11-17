@@ -56,6 +56,8 @@ jobs:
       - name: 生成工程
         run: xcodegen generate
       - name: 编译
+        id: build
+        continue-on-error: true
         run: |
           set -o pipefail
           xcodebuild build \
@@ -93,6 +95,15 @@ jobs:
           {
             echo "job=ipa"
             echo "status=$ST"
+            # 编译失败时把关键错误行写进报告，否则从手机上根本看不到 CI 日志
+            if [ "$ST" != "success" ]; then
+              echo "--- 编译错误 ---"
+              grep -m 40 -E "error:|note: |The following build commands failed" /tmp/build.log 2>/dev/null \
+                | sed 's|/Users/runner/work/[^/]*/[^/]*/||g' | head -60 || echo "(无 /tmp/build.log)"
+              echo "--- 归档错误 ---"
+              grep -m 20 -E "error:|BUILD FAILED" /tmp/archive.log 2>/dev/null | head -25 || true
+              echo "--- 报告完 ---"
+            fi
             echo "sha=$GITHUB_SHA"
             echo "run_id=$GITHUB_RUN_ID"
             echo "time=$(date -u +%FT%TZ)"

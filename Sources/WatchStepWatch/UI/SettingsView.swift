@@ -42,11 +42,6 @@ struct SettingsView: View {
                     set: { v in engine.update { $0.pauseWhileCharging = v } }
                 ))
 
-                Toggle("摘下时不催", isOn: Binding(
-                    get: { engine.config.pauseOffWrist },
-                    set: { v in engine.update { $0.pauseOffWrist = v } }
-                ))
-
                 Toggle("电量低不催", isOn: Binding(
                     get: { engine.config.pauseOnLowBattery },
                     set: { v in engine.update { $0.pauseOnLowBattery = v } }

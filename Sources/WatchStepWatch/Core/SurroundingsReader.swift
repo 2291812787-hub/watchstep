@@ -31,13 +31,9 @@ enum SurroundingsReader {
         )
     }
 
-    /// 手表是否已上锁。戴着时（手腕检测开着）熄屏也不算锁；
-    /// 摘下放桌上大约一分钟就会落锁，所以这是目前最接近「脱腕」的公开信号。
-    private static func isLocked() -> Bool {
-        if #available(watchOS 9.0, *) {
-            return WKApplication.shared().isDeviceLocked
-        } else {
-            return WKExtension.shared().isDeviceLocked
-        }
-    }
+        /// watchOS 没有公开的「脱腕 / 锁屏」查询接口 —— WKApplication 和 WKExtension
+    /// 都没有 isDeviceLocked（Apple 文档里查不到这个符号），编译期就会报错。
+    /// 而且摘下手表时没有皮肤接触，震动本来也传不到人身上，
+    /// 所以这里不做脱腕判断，直接当作戴着。
+    private static func isLocked() -> Bool { false }
 }
