@@ -229,6 +229,10 @@ final class WatchEngine: ObservableObject {
             // 挂起期间那条预排的"起来走动"可能已经被系统弹出来了（它的步数是
             // 排程时的快照，现在可能是错的）。先认账、再从通知中心撤掉，
             // 然后只发一条正确的 —— 用户不会看到"先催命、后说走够"这种自打嘴巴。
+            // 走够了必须立刻撤接力 —— 否则那条 repeats 会在"已经走够"之后
+            // 继续每分钟弹一次，一直弹到用户点开 App 为止。
+            NotificationPlanner.shared.disarmRelay()
+
             let delivered = preDelivered
             // 不在这里 cancelAll：撤光和重排之间若被系统冻结，系统里一条通知都不剩，
             // 而 App 已死、没人能补。replaceChain 会自己撤掉多余槽位。
@@ -272,6 +276,22 @@ final class WatchEngine: ObservableObject {
                     AnchorStore.shared.anchor = now
                 }
                 nudgesToday = AnchorStore.shared.nudgesToday
+                break
+            }
+
+            // 接力挂着的时候，催命由系统那条重复通知负责。
+            // 这里若再 fireNudge，App 活着的每一分钟都会多弹一条 —— 正是
+            // 「一分钟里好几条」的另一条来路。只在没接力时做实时催命。
+            if NotificationPlanner.shared.relayArmed {
+                // 必须记 nudgingSince：走够时靠 `wasNudging` 决定要不要发
+                // 「走够了」那条提示。接力模式下 delivered 永远为 nil，
+                // 再不记这个，用户走够了屏幕上什么都没有，分不清是走够了还是又被催。
+                if AnchorStore.shared.nudgingSince == nil {
+                    AnchorStore.shared.nudgingSince = now
+                }
+                AnchorStore.shared.noteIdle(now.timeIntervalSince(anchor))
+                nudgesToday = AnchorStore.shared.nudgesToday
+                longestIdle = AnchorStore.shared.longestIdle
                 break
             }
 
@@ -367,6 +387,11 @@ final class WatchEngine: ObservableObject {
     /// 就再没有任何东西能把它排回来 —— 用户看到的正是「响过一两声就彻底安静」。
     /// 宁可多响，不可哑掉。
     private func clearChain(_ why: String, now: Date) {
+        // 接力**无论前后台都要撤**。这跟精确链的规则相反，理由也相反：
+        // 精确链最多 60 条，会自己耗尽，后台误判的代价有限，所以宁可留着；
+        // 接力不会耗尽，误判一次就是整夜每分钟响 —— 那边必须宁可少响。
+        NotificationPlanner.shared.disarmRelay()
+
         if isBackgroundNow() {
             AnchorStore.shared.noteChain("≈ 后台想撤(\(why))，拒绝，链保持")
             return
@@ -423,6 +448,51 @@ final class WatchEngine: ObservableObject {
         // 只有当某个网格点真的过去（跨过一条提醒）时，链才降一位、重排一次 ——
         // 即每分钟最多一次，而不是每十几秒一次。
         let step = max(cfg.tick, 5)
+
+        // ---- 接力：突破 60 条上限 ----
+        //
+        // 60 条 × 间隔 = 最多撑多久。1 分钟间隔只有 60 分钟，5 分钟有 5 小时。
+        // 一过这个点，系统里一条待发都没有了，只能等 App 被系统唤醒才补 ——
+        // 而 watchOS 的后台刷新约 4 次/小时且**不保证执行**，这就是「超过一小时
+        // 要手动点一下」的全部原因：不是 App 被杀，是链用完了。
+        //
+        // 所以只要进了催命期、App 醒着，就换成一条 repeats 通知：只占 1 个槽位，
+        // 无限期按间隔响。从这一刻起，App 之后死不死都不再影响。
+        //
+        // 只在「一小时之后还在生效时段内」时挂 —— repeats 触发器没法按时段
+        // 自己停，跨夜挂上就是整夜响。时段末尾那一段继续用精确链兜着（它会自然停）。
+        if now >= deadline {
+            if cfg.isActive(at: now.addingTimeInterval(3600)) {
+                if !NotificationPlanner.shared.relayArmed {
+                    let body = "还没走够 \(cfg.targetSteps) 步 · 起来走动"
+                    NotificationPlanner.shared.armRelay(
+                        interval: step,
+                        title: NotificationPlanner.title,
+                        body: body
+                    ) { ok in
+                        if ok {
+                            AnchorStore.shared.noteChain(
+                                "接力已挂：每 \(Int(step / 60)) 分钟一条，不再受 60 条上限约束")
+                            // 接力接手，精确链全撤 —— 两条并存就是每次响两声。
+                            // 顺序不能反：先挂上再撤，中间任何一刻系统里都有通知。
+                            NotificationPlanner.shared.replaceChain([], now: Date()) { _ in "" }
+                            self.pendingNotifications = 1
+                        } else {
+                            AnchorStore.shared.noteChain("✗ 接力排不进去，继续用精确链")
+                        }
+                    }
+                }
+                // 接力挂着（或正在挂）时不再排精确链
+                if NotificationPlanner.shared.relayArmed {
+                    pendingNotifications = 1
+                    return
+                }
+            }
+        } else if NotificationPlanner.shared.relayArmed {
+            // 回到了窗口内（刚走够、锚点被重置）：接力必须在窗口里就撤，
+            // 否则它会在窗口还没到期时按老间隔继续响。
+            NotificationPlanner.shared.disarmRelay()
+        }
         let gap = Swift.max(10, Swift.min(step / 2, 60))
         let lastNudge = AnchorStore.shared.lastNudgeAt
 
@@ -630,8 +700,12 @@ final class WatchEngine: ObservableObject {
         NotificationPlanner.shared.pendingCount { [weak self] n in
             guard let self = self else { return }
             var lines = log
-            if n <= NotificationPlanner.maxSlots {
-                lines.append("✓ 待发通知 \(n) 条")
+            if NotificationPlanner.shared.relayArmed {
+                // 接力模式下"只有 1 条"是**正常且正确**的：那一条 repeats 会
+                // 无限期按间隔响，不受 60 条上限约束。不写清楚会被当成坏了。
+                lines.append("✓ 接力中：重复通知每 \(self.config.tickMinutes) 分钟一条（永不到期）")
+            } else if n <= NotificationPlanner.maxSlots {
+                lines.append("✓ 待发通知 \(n) 条（最多撑 \(n * self.config.tickMinutes) 分钟）")
             } else {
                 lines.append("✗ 待发通知 \(n) 条（超过上限，对账失效）")
             }
