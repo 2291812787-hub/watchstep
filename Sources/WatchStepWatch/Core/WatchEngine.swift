@@ -50,6 +50,9 @@ final class WatchEngine: ObservableObject {
             return
         }
         booted = true
+        // 进前台就把通知中心里已经弹过的清掉：该响的时候都响过了、也震过了，
+        // 堆着只会变成「一打开一堆消息」。（待发的整条链绝不动 —— 那是后台继续催的命根。）
+        NotificationPlanner.shared.clearDeliveredNotificationCenter()
         NotificationPlanner.shared.requestAuthorization()
         NotificationPlanner.shared.authorizationStatus { [weak self] s in
             self?.notificationAuth = s
@@ -127,7 +130,17 @@ final class WatchEngine: ObservableObject {
         StepReader.shared.steps(from: windowStart, to: now) { [weak self] steps in
             guard let self = self else { return }
             self.apply(steps: steps, anchor: anchor, now: now, cfg: cfg)
-            self.reconcileNotifications(steps: steps, anchor: anchor, now: Date(), cfg: cfg)
+            // 走满时 apply() 会把锚点重置成「现在」——新一轮从零开始计时。
+            // 但传进 reconcile 的 steps 还是刚才那个 ≥200 的旧值、anchor 还是旧值，
+            // 于是 reconcile 命中「已走够 → 一条都不留」，把新一轮的通知全撤了。
+            // 之后要等下一次 tick 才补排；而用户不点进来，下一次 tick 永远不来 ——
+            // 这就是「5 分钟走满后，不点进去就不再提醒，卡在那里」的全部原因。
+            //
+            // 所以这里必须用**重置后**的锚点和归零的步数去重排：走满的同一瞬间
+            // 就把下一轮该催的那条排进系统，App 之后死不死都挡不住它响。
+            let liveAnchor = AnchorStore.shared.anchor
+            let liveSteps = liveAnchor > anchor ? 0 : steps
+            self.reconcileNotifications(steps: liveSteps, anchor: liveAnchor, now: Date(), cfg: cfg)
             self.busy = false
             self.busySince = nil
             if self.pendingForce {
@@ -320,66 +333,66 @@ final class WatchEngine: ObservableObject {
         // 所以低电量只停常驻会话（省电的地方），兜底的那条通知留着。
         let q = RuleEngine.quietReason(now: now, config: cfg, surroundings: surroundings)
         if let q = q, q != .lowBattery {
-            NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
+            NotificationPlanner.shared.replaceChain([], now: now) { _ in "" }
             pendingNotifications = 0
             return
         }
 
         guard cfg.isActive(at: now) else {
-            NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
+            NotificationPlanner.shared.replaceChain([], now: now) { _ in "" }
             pendingNotifications = 0
             return
         }
 
         // 已走够 → 一条都不该留
         if let s = steps, s >= cfg.targetSteps {
-            NotificationPlanner.shared.replace(fireAt: nil, now: now, body: "")
+            NotificationPlanner.shared.replaceChain([], now: now) { _ in "" }
             pendingNotifications = 0
             return
         }
 
         let deadline = RuleEngine.deadline(anchor: anchor, config: cfg)
 
-        // 已在催命期：排在"上次催命 + 一个间隔"—— 也就是正文里承诺的那一刻。
-        // 以前排的是 2 个间隔，比嘴上说的晚一倍，用户会觉得"说好一分钟，结果没来"。
-        // 已经有更早的待发通知就沿用，避免每 30 秒的 tick 把它往后推。
-        let fire: Date
-        if now >= deadline {
-            // 按当前配置算出「这一刻该几点再催」。
-            let base = AnchorStore.shared.lastNudgeAt ?? now
-            let due = max(base.addingTimeInterval(cfg.tick), now.addingTimeInterval(5))
-            // **但只有它跟当前配置算出来的时刻吻合时才沿用**：窗口/间隔改过之后，
-            // 系统里那条是按旧参数排的，硬沿用就等于一直按上一轮的节奏走，
-            // 直到它自己弹出来为止 —— 这正是「改成 2 分钟，实际还按上一轮走，
-            // 必须等它触发过一次、点进去，才变成 2 分钟」的成因。
-            if let p = NotificationPlanner.shared.nextFireAt, p > now,
-               abs(p.timeIntervalSince(due)) <= 2 {
-                fire = p
-            } else {
-                fire = due
+        // ---- 排整条链 ----
+        //
+        // 时间轴 = 窗口到期那一刻，然后每隔 `间隔` 一次，一直排到 24 分钟后
+        // （最多 24 条，系统上限是 64）。
+        //
+        // 这条链就是「App 死了也照样提醒」的全部实现。之前只排一条，响应完就没了，
+        // 下一条要等 App 醒来 —— 用户看到的是「第一个窗口结束响过，第二个就没了」。
+        //
+        // 时刻锚定在 deadline 上、不随 tick 漂移：每 30 秒重排一次算出来的结果完全相同，
+        // replaceChain 会直接跳过，于是不会出现"每次重排都往后推一分钟、永远差一分钟"。
+        var fires: [Date] = []
+        var t = deadline
+        var guardCount = 0
+        let horizon = now.addingTimeInterval(24 * 60)
+        while t <= horizon && fires.count < NotificationPlanner.maxSlots {
+            // 已经到点的不用排（那条该由实时催命负责），过了生效时段也不再排
+            if t.timeIntervalSince(now) > 1 {
+                if !cfg.isActive(at: t) { break }
+                fires.append(t)
             }
-        } else {
-            // 窗口未满：排在窗口到期那一刻
-            fire = deadline
+            t = t.addingTimeInterval(cfg.tick)
+            guardCount += 1
+            if guardCount > 200 { break }
         }
+        // 窗口本身比 24 分钟还长（比如 30 分钟）：只排到期那一条
+        if fires.isEmpty { fires = [deadline] }
 
-        // 坐着的分钟数按通知**真正弹出的时刻**（fire）现算，不按现在算 ——
+        // 坐着的分钟数按通知**真正弹出的时刻**现算，不按现在算 ——
         // 排程可能提前好几分钟，用 now 算会少报。
-        NotificationPlanner.shared.replace(
-            fireAt: fire,
-            now: now,
-            body: NudgeText.reminder(
+        NotificationPlanner.shared.replaceChain(fires, now: now) { fire in
+            NudgeText.reminder(
                 targetSteps: cfg.targetSteps,
                 steps: steps,
                 sittingMinutes: Int(fire.timeIntervalSince(anchor) / 60),
                 tickMinutes: cfg.tickMinutes,
                 approximate: true          // 步数是排程时的快照，弹出时可能又走了几步
             )
-        )
-
-        NotificationPlanner.shared.pendingCount { [weak self] n in
-            self?.pendingNotifications = n
         }
+
+        pendingNotifications = NotificationPlanner.shared.chainCount
     }
 
     // MARK: - 对外操作
@@ -516,14 +529,14 @@ final class WatchEngine: ObservableObject {
             log.append("✓ 锚点正常，已静坐 \(Int(idle / 60)) 分钟")
         }
 
-        // 2. 待发通知只能是 0 或 1 条
+        // 2. 待发通知：现在是一整条链（后台死了也能按点响），上限 maxSlots
         NotificationPlanner.shared.pendingCount { [weak self] n in
             guard let self = self else { return }
             var lines = log
-            if n <= 1 {
+            if n <= NotificationPlanner.maxSlots {
                 lines.append("✓ 待发通知 \(n) 条")
             } else {
-                lines.append("✗ 待发通知 \(n) 条（应 ≤ 1，对账失效）")
+                lines.append("✗ 待发通知 \(n) 条（超过上限，对账失效）")
             }
 
             // 3. 通知授权
@@ -567,9 +580,9 @@ final class WatchEngine: ObservableObject {
                 if let p = NotificationPlanner.shared.nextFireAt {
                     let d = Int(p.timeIntervalSince(now))
                     if d >= 0 {
-                        lines.append("· 待发通知 " + String(d) + " 秒后")
+                        lines.append("· 待发 \(n) 条，最近 " + String(d) + " 秒后")
                     } else {
-                        lines.append("· 待发通知已过期 " + String(-d) + " 秒")
+                        lines.append("· 最近一条已过期 " + String(-d) + " 秒")
                     }
                 } else {
                     lines.append("· 无待发通知")
