@@ -27,15 +27,14 @@ enum NudgeText {
         guard let s = steps else {
             return "该走走了 · 已坐 \(sit) 分钟，\(every)。"
         }
-        // 预排通知进系统之后内容就改不了了，步数只能是排程那一刻的快照。
-        // 但"只说坐了多久"更没用 —— 没有步数就不知道还差不差。
-        // 所以带上快照数字，前面加"约"，不假装精确。
-        let snapRemain = max(0, target - s)
+        // 预排通知进系统之后内容就改不了了。步数是排程那一刻的快照，
+        // 而它可能几十分钟后才弹 —— 那时用户可能早已走够 200 步。
+        // 写着"还差约 137 步"就是在打自己的脸（真走够了还催），
+        // 加"约"也救不回来。所以预排那条**一个步数都不说**：
+        // 只报能算准的（坐了多久）+ 让它起身。
+        // 要精确数字的机会在 App 活着的时候，那条走 fireNow。
         if approximate {
-            if snapRemain == 0 {
-                return "约已满 \(target) 步 · 已坐 \(sit) 分钟，\(every)。"
-            }
-            return "还差约 \(snapRemain) 步 · 已坐 \(sit) 分钟，\(every)。"
+            return "该走走了 · 已坐 \(sit) 分钟，\(every)。"
         }
         let remain = max(0, target - s)
         if remain == 0 {
