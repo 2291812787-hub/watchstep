@@ -318,6 +318,22 @@ final class WatchEngine: ObservableObject {
     // MARK: - 通知对账（关键）
 
     /// 任何时刻：系统里最多一条待发通知，且它的时刻必须由当前锚点现算得出。
+    /// 撤链的唯一出口，带一条审计。
+    ///
+    /// **后台不撤**：后台判定依赖 CMPedometer 和电量/充电读取，这两个在挂起边缘
+    /// 都可能拿到失败或旧值。一旦在这里把链撤空，而 App 随即被系统挂起，
+    /// 就再没有任何东西能把它排回来 —— 用户看到的正是「响过一两声就彻底安静」。
+    /// 宁可多响，不可哑掉。
+    private func clearChain(_ why: String, now: Date) {
+        if isBackgroundNow() {
+            AnchorStore.shared.noteChain("≈ 后台想撤(\(why))，拒绝，链保持")
+            return
+        }
+        AnchorStore.shared.noteChain("✗ 撤链(\(why))")
+        NotificationPlanner.shared.replaceChain([], now: now) { _ in "" }
+        pendingNotifications = 0
+    }
+
     private func reconcileNotifications(steps: Int?, anchor: Date, now: Date, cfg: Config) {
         // 会话开关必须先算：下面每一条都是 early return，
         // 放在函数末尾就会被跳过 —— 一插上充电器那次 tick 正好命中第一个 guard，
@@ -334,21 +350,18 @@ final class WatchEngine: ObservableObject {
         // 所以低电量只停常驻会话（省电的地方），兜底的那条通知留着。
         let q = RuleEngine.quietReason(now: now, config: cfg, surroundings: surroundings)
         if let q = q, q != .lowBattery {
-            NotificationPlanner.shared.replaceChain([], now: now) { _ in "" }
-            pendingNotifications = 0
+            clearChain("安静:\(q)", now: now)
             return
         }
 
         guard cfg.isActive(at: now) else {
-            NotificationPlanner.shared.replaceChain([], now: now) { _ in "" }
-            pendingNotifications = 0
+            clearChain("非活动时段", now: now)
             return
         }
 
         // 已走够 → 一条都不该留
         if let s = steps, s >= cfg.targetSteps {
-            NotificationPlanner.shared.replaceChain([], now: now) { _ in "" }
-            pendingNotifications = 0
+            clearChain("已走够\(s)步", now: now)
             return
         }
 
@@ -375,8 +388,11 @@ final class WatchEngine: ObservableObject {
 
         var fires: [Date] = []
         var t = first
-        let horizon = now.addingTimeInterval(24 * 60)
-        while t <= horizon && fires.count < NotificationPlanner.maxSlots {
+        // 只由 maxSlots 决定链有多长，不再另设"从现在起 24 分钟内"的截断。
+        // 那个截断和旧的 maxSlots = 24 配套，改大之后忘了同步，于是设 30 分钟窗口时
+        // first（30 分钟后）已经落在截断之外 → fires 为空 → 兜底成「只排 1 条」，
+        // 响完系统里就空了，App 不醒就再也不响。用户看到的「只响一两条就没了」就是它。
+        while fires.count < NotificationPlanner.maxSlots {
             if !cfg.isActive(at: t) { break }
             fires.append(t)
             t = t.addingTimeInterval(cfg.tick)
@@ -396,6 +412,13 @@ final class WatchEngine: ObservableObject {
         }
 
         pendingNotifications = NotificationPlanner.shared.chainCount
+        AnchorStore.shared.noteChain("排\(fires.count)条 \(fmt(first))→\(fmt(fires.last ?? first))")
+    }
+
+    private func fmt(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f.string(from: d)
     }
 
     // MARK: - 对外操作
@@ -550,6 +573,9 @@ final class WatchEngine: ObservableObject {
                 lines.append("✓ 待发通知 \(n) 条")
             } else {
                 lines.append("✗ 待发通知 \(n) 条（超过上限，对账失效）")
+            }
+            for row in AnchorStore.shared.chainLog.split(separator: "\n").suffix(4) {
+                lines.append("· \(row)")
             }
 
             // 3. 通知授权

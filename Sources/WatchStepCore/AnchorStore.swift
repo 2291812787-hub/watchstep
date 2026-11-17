@@ -23,6 +23,7 @@ final class AnchorStore {
         static let lastBgTickAt = "ws.lastBgTickAt"
         static let tickCount = "ws.tickCount"
         static let bgTickCount = "ws.bgTickCount"
+        static let chainLog = "ws.chainLog"
     }
 
     // MARK: - 锚点
@@ -91,6 +92,21 @@ final class AnchorStore {
     var bgTickCount: Int {
         get { d.integer(forKey: K.bgTickCount) }
         set { d.set(newValue, forKey: K.bgTickCount) }
+    }
+
+    /// 链的变动流水（最近 8 条，含时间、原因、最终条数）。
+    /// 这是唯一能回答「提醒是什么时候、因为什么变空的」的证据。
+    var chainLog: [String] {
+        get { (d.array(forKey: K.chainLog) as? [String]) ?? [] }
+        set { d.set(Array(newValue.suffix(8)), forKey: K.chainLog) }
+    }
+
+    func noteChain(_ line: String) {
+        var l = chainLog
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        l.append("\(f.string(from: Date())) \(line)")
+        chainLog = l
     }
 
     /// 最后一次在后台跑判定的时刻。若它一直停在"你合上屏幕那一刻"，
