@@ -221,14 +221,8 @@ final class NotificationPlanner {
                 @unknown default: return "?"
                 }
             }
-            let style: String
-            switch settings.alertStyle {
-            case .banner: style = "横幅"
-            case .alert: style = "提醒"
-            case .none: style = "**无**"
-            @unknown default: style = "?"
-            }
-            let detail = "· 样式 \(style) 声音 \(flag(settings.soundSetting)) 横幅 \(flag(settings.alertSetting)) 通知中心 \(flag(settings.notificationCenterSetting))"
+            // watchOS 没有 alertStyle（那是 iOS 的）。能拿到的是下面三项开关。
+            let detail = "· 声音 \(flag(settings.soundSetting)) 横幅 \(flag(settings.alertSetting)) 通知中心 \(flag(settings.notificationCenterSetting))"
             DispatchQueue.main.async {
                 completion(s)
                 self.lastStyleReport = detail
