@@ -15,9 +15,16 @@ final class StepsUploader {
     private let token = "c7bb1f13a7b29c53e81836d66a6afded"
 
     /// 每天推送的时点（本地时区）
-    static let slots: [(hour: Int, minute: Int)] = [
-        (9, 0), (12, 0), (15, 0), (18, 0), (21, 0), (23, 30)
-    ]
+    /// 8:00–23:00 每小时整点，末尾补 23:30。
+    /// 原来只有 6 个点（9/12/15/18/21/23:30）：手表靠系统唤醒，某个点醒不来就少报
+    /// 3~6 小时。改成每小时之后最多只差 1 小时；而且每条上报的都是当天累计值，
+    /// 后一条天然顶掉前一条，漏点不需要补。
+    static let slots: [(hour: Int, minute: Int)] = {
+        var out: [(hour: Int, minute: Int)] = []
+        for h in 8...23 { out.append((h, 0)) }
+        out.append((23, 30))
+        return out
+    }()
 
     private let kLastSent = "upload.lastSentSlot"
     private let kLastAttempt = "upload.lastAttemptAt"
@@ -132,7 +139,7 @@ final class StepsUploader {
                     return
                 }
                 let ns = err as NSError
-                self.defaults.set("\(stamp) 失败 slot\(slot) code\(ns.code) \(err.localizedDescription)",
+                self.defaults.set("\(stamp) 失败 slot\(slot) net code\(ns.code) \(err.localizedDescription)",
                                   forKey: self.kLastResult)
                 return
             }
@@ -140,7 +147,9 @@ final class StepsUploader {
                 self.defaults.set(key, forKey: self.kLastSent)
                 self.defaults.set(Date(), forKey: self.kLastOK)
                 self.defaults.set(steps, forKey: self.kLastSteps)
-                self.defaults.set("\(stamp) 成功 slot\(slot) \(steps)步", forKey: self.kLastResult)
+                // 标注走的是哪条路：lan=家里局域网直连，net=公网兜底。
+                self.defaults.set("\(stamp) 成功 slot\(slot) \(steps)步 \(lan ? "lan" : "net")",
+                                  forKey: self.kLastResult)
             } else {
                 let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
                 self.defaults.set("\(stamp) HTTP\(code) slot\(slot) \(text.prefix(80))",
