@@ -34,12 +34,13 @@ final class StepsUploader {
     private let kLastSteps = "upload.lastSteps"
 
     /// 专用 session。
-    /// watchOS 上 URLSession.shared 在路径没就绪时会立刻返回 -1004（150~300ms 就回来，
-    /// 根本没等超时）。waitsForConnectivity 让 CFNetwork 等一条可用路径再发，
-    /// 蜂窝也不被当作"昂贵网络"拒掉；这两条虽是默认值，显式写死防止以后变化。
+    /// 早先为了“等路径恢复”开了 waitsForConnectivity，结果没有可用路径时
+    /// 一个请求能挂 39 秒（超时参数管不到等待阶段），把 inFlight 占死、
+    /// 后面每轮 tick 都在闸门前 return。改成快速失败 + 60 秒退避重试，
+    /// 行为可预期得多。
     static let session: URLSession = {
         let c = URLSessionConfiguration.ephemeral
-        c.waitsForConnectivity = true
+        c.waitsForConnectivity = false
         c.allowsExpensiveNetworkAccess = true
         c.allowsConstrainedNetworkAccess = true
         c.timeoutIntervalForRequest = 12
