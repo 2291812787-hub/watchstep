@@ -13,8 +13,8 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "2.5"
-    CURRENT_PROJECT_VERSION: "15"
+    MARKETING_VERSION: "2.6"
+    CURRENT_PROJECT_VERSION: "16"
     SWIFT_VERSION: "5.0"
     # 自签路线：手动签名，不自动要描述文件
     CODE_SIGN_STYLE: Manual
@@ -70,7 +70,14 @@ targets:
         WKCompanionAppBundleIdentifier: top.webchangming.watchstep
         WKBackgroundModes:
           - self-care
-        NSMotionUsageDescription: 读取步数，用于判断你这两天有没有走动。数据只留在手表上，不上传。
+        NSMotionUsageDescription: 读取步数，用于判断你这两天有没有走动。
+        # 上传优先走家里局域网（192.168.31.82:8085，纯 HTTP，不用 TLS、不出公网），
+        # 失败才回退到 Cloudflare 域名（HTTPS）。局域网那条是明文 HTTP，默认被 ATS 拦，
+        # 而 IP 字面量没法用 NSExceptionDomains 配，只能整体放开。
+        # 这个 app 只自签给自己用，不进 App Store，没有审核约束。
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
         UIDeviceFamily:
           - 4
     settings:

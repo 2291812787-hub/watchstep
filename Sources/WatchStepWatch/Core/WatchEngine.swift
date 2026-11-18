@@ -398,18 +398,23 @@ final class WatchEngine: ObservableObject {
         // 已经过了窗口（催命期）时，下一条按「上次催命 + 一个间隔」算，
         // 也就是正文里承诺的那一刻；实在错过了就 5 秒后补。
         let first: Date
-        if now < deadline {
+        if now <= deadline {
             first = deadline
         } else {
-            let base = AnchorStore.shared.lastNudgeAt ?? deadline
-            // 错过了就等一整个间隔。
+            // 钉在 deadline 上的固定网格：deadline + n×间隔，只由 deadline 决定，
+            // 与"现在几点"无关。
             //
-            // 以前这里是 now + 5 秒的"赶紧补一条"。而 watchOS 会反复杀进程再拉起
-            // （抬腕、步数变化、常驻会话重建都会），每次拉起 chain 都是空的、磁盘上的
-            // lastNudgeAt 却还在 → 于是每次重启都排一条 5 秒后的通知，几秒响一个。
-            // 用户看到的就是「开头密集、后面才稳」。
-            // 等一个完整间隔，最坏只是晚 60 秒，绝不会多数一条。
-            first = max(base.addingTimeInterval(cfg.tick), now.addingTimeInterval(cfg.tick))
+            // 以前是 max(base + 间隔, now + 间隔)，那个 now 让整条链跟着当前时刻一起
+            // 往前滑：每 tick 网格都变一点 → 链永远「不是同一条」→ 每分钟整条 60 条被
+            // 拆掉重建（待发数永远补回 60）、而「1 分钟后提醒你」这个承诺每次都被推到
+            // 新的「1 分钟后」，永远不会真正到点。开头「几秒一条」就是重建和刚投递的
+            // 那条撞在一起。
+            //
+            // 固定网格之后：到点就是到点，且相邻两次 tick 算出的时刻完全相同 →
+            // same 判定能生效 → 不乱重建。
+            let tick = max(1, cfg.tick)
+            let n = floor(now.timeIntervalSince(deadline) / tick) + 1
+            first = deadline.addingTimeInterval(max(1, n) * tick)
         }
 
         var fires: [Date] = []

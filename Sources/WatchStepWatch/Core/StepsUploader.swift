@@ -10,7 +10,8 @@ final class StepsUploader {
 
     static let shared = StepsUploader()
 
-    private let endpoint = URL(string: "https://watch.webchangming.top/steps")!
+    private let lanURL = URL(string: "http://192.168.31.82:8085/steps")!
+    private let wanURL = URL(string: "https://watch.webchangming.top/steps")!
     private let token = "c7bb1f13a7b29c53e81836d66a6afded"
 
     /// 每天推送的时点（本地时区）
@@ -27,6 +28,10 @@ final class StepsUploader {
 
     private let defaults = UserDefaults.standard
     private var inFlight = false
+    /// 起飞时刻。请求挂住时（watchOS 随时可能把进程冻住，回调永远不来）
+    /// inFlight 会永远是 true，于是之后每次 tick 都在闸门前 return，再也不重试。
+    /// 超过 45 秒一律当作已经失败。
+    private var inFlightAt: Date?
     private let pedometer = CMPedometer()
 
     private static let dayFmt: DateFormatter = {
@@ -51,7 +56,11 @@ final class StepsUploader {
 
         let key = "\(Self.dayFmt.string(from: now))#\(slot)"
         if defaults.string(forKey: kLastSent) == key { return }
-        if inFlight { return }
+        if inFlight {
+            if let t = inFlightAt, now.timeIntervalSince(t) < 45 { return }
+            // 挂太久了，当它已经死了
+            inFlight = false
+        }
 
         // 同一个点失败后退避 60 秒，别把每次 tick 都拿去撞网络
         if defaults.string(forKey: kLastSlotAttempt) == key,
@@ -61,6 +70,7 @@ final class StepsUploader {
         }
 
         inFlight = true
+        inFlightAt = now
         defaults.set(key, forKey: kLastSlotAttempt)
         defaults.set(now, forKey: kLastAttempt)
 
@@ -90,10 +100,11 @@ final class StepsUploader {
         return found
     }
 
-    private func post(now: Date, slot: Int, steps: Int, key: String, note: String) {
-        var req = URLRequest(url: endpoint)
+    private func post(now: Date, slot: Int, steps: Int, key: String, note: String, lan: Bool = true) {
+        // inFlight 一直保持 true 到最终落定，避免回退过程中又起第二个请求。
+        var req = URLRequest(url: lan ? lanURL : wanURL)
         req.httpMethod = "POST"
-        req.timeoutInterval = 20
+        req.timeoutInterval = lan ? 6 : 20
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(token, forHTTPHeaderField: "X-Watch-Token")
 
@@ -113,7 +124,15 @@ final class StepsUploader {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let stamp = Self.clock.string(from: Date())
             if let err = err {
-                self.defaults.set("\(stamp) 失败 slot\(slot) \(err.localizedDescription)",
+                // 局域网那条失败就立刻改走公网，别再等下一个 60 秒退避。
+                // 家里 WiFi 永远优先，出门（蜂窝）时第一次就落到公网，只多花 6 秒。
+                if lan {
+                    self.inFlight = false
+                    self.post(now: now, slot: slot, steps: steps, key: key, note: note, lan: false)
+                    return
+                }
+                let ns = err as NSError
+                self.defaults.set("\(stamp) 失败 slot\(slot) code\(ns.code) \(err.localizedDescription)",
                                   forKey: self.kLastResult)
                 return
             }
