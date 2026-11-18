@@ -62,28 +62,18 @@ final class NudgeTextTests: XCTestCase {
         XCTAssertFalse(s.contains("-5"))
     }
 
-    // MARK: - 预排那条绝不写步数
+    // MARK: - 预排那条用"约"
 
-    func testPreScheduledNeverCarriesSteps() {
-        // 这条测试锁的是一个**产品判断**，不是措辞：
-        // 一条链一次排 60 条，正文全在排程那一刻冻死；App 在后台不醒就永不刷新。
-        // 用户走了一小时后抬腕，看到的还是排程时的快照 —— 而且**必然偏低**，
-        // 因为后面的步数一条都没算进去。他会以为白走了。
-        // 一个必然错、且总往"还没走够"方向错的数字，比没有数字坏得多。
+    func testApproximateMarksSnapshotSteps() {
+        // 预排通知的步数是排程时的快照，弹出时可能又多走了几步 ——
+        // 所以写"约"，不假装精确。这两条是同一段文案，只差一个词。
         let scheduled = NudgeText.reminder(targetSteps: 200, steps: 63, sittingMinutes: 31,
                                            tickMinutes: 1, approximate: true)
-        XCTAssertEqual(scheduled, "该走走了 · 已坐 31 分钟，1 分钟后再提醒你一次。")
-        XCTAssertFalse(scheduled.contains("137"), "预排通知不许出现冻结的步数")
-        XCTAssertFalse(scheduled.contains("还差"), "预排通知不许声称还差多少步")
-
-        // 步数读不到时，预排版和它一模一样 —— 它本来就不依赖步数。
-        let noSteps = NudgeText.reminder(targetSteps: 200, steps: nil, sittingMinutes: 31,
-                                         tickMinutes: 1, approximate: true)
-        XCTAssertEqual(noSteps, scheduled)
-
-        // 前台实时那条相反：数字是刚读的，写在通知里不会过期，必须带上。
         let live = NudgeText.reminder(targetSteps: 200, steps: 63, sittingMinutes: 31,
                                       tickMinutes: 1)
+        // 预排版带快照步数（"约"），链每次重排都会刷新；立刻弹的那条不带"约"。
+        XCTAssertEqual(scheduled, "还差约 137 步 · 已坐 31 分钟，1 分钟后再提醒你一次。")
+        XCTAssertTrue(scheduled.contains("还差约 137 步"), "预排通知要带拍快照时的剩余步数")
         XCTAssertEqual(live, "还差 137 步 · 已坐 31 分钟，1 分钟后再提醒你一次。")
         XCTAssertNotEqual(scheduled, live, "排程与立刻弹的措辞要能区分")
     }
