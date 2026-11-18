@@ -13,8 +13,8 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "3.0"
-    CURRENT_PROJECT_VERSION: "20"
+    MARKETING_VERSION: "3.1"
+    CURRENT_PROJECT_VERSION: "21"
     SWIFT_VERSION: "5.0"
     # 自签路线：手动签名，不自动要描述文件
     CODE_SIGN_STYLE: Manual
@@ -30,7 +30,7 @@ targets:
       - Sources/WatchStep
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: top.webchangming.watchstep
+        PRODUCT_BUNDLE_IDENTIFIER: top.webchangming.step
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: 催步
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
@@ -67,32 +67,23 @@ targets:
         # 传统 WatchKit 2.0 app（带 WatchKit Extension）才用 WKWatchKitApp=true。
         WKApplication: true
         WKWatchOnly: false
-        WKCompanionAppBundleIdentifier: top.webchangming.watchstep
+        WKCompanionAppBundleIdentifier: top.webchangming.step
         WKBackgroundModes:
           - self-care
         NSMotionUsageDescription: 读取步数，用于判断你这两天有没有走动。
-        # 上传优先走家里局域网（192.168.31.82:8085，纯 HTTP，不用 TLS、不出公网），
-        # 失败才回退到 Cloudflare 域名（HTTPS）。局域网那条是明文 HTTP，默认被 ATS 拦，
-        # 而 IP 字面量没法用 NSExceptionDomains 配，只能整体放开。
-        # 这个 app 只自签给自己用，不进 App Store，没有审核约束。
-        #
-        # 关键：不要再加 NSAllowsLocalNetworking。iOS 10 / watchOS 3.2 起，
-        # 只要这三把钥匙（ForMedia / InWebContent / LocalNetworking）出现任意一把，
-        # NSAllowsArbitraryLoads 就会被**忽略**，于是明文打到 IP 上又被 ATS 拦回去。
-        # 而且 LocalNetworking 只覆盖 .local / 无点单标签主机名，不覆盖 IP 字面量，
-        # 加了它既救不了局域网、还把 ArbitraryLoads 废掉。只留 ArbitraryLoads。
-        NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
-        # iOS 14 起访问局域网设备（192.168.x.x）需要「本地网络」权限。
-        # 没有这条描述串时系统不弹授权框、直接阻断（-1004，150ms 就返回）；
-        # 有它才会在手表上弹一次「是否允许访问本地网络」。
-        NSLocalNetworkUsageDescription: 在家里直接连电脑上传步数，不经过公网。
+        # 这里刻意不放 NSAppTransportSecurity 和 NSLocalNetworkUsageDescription。
+        # 2.4(14) 就是没有这两个键、只走 HTTPS 公网，服务器收到了 09:55 / 10:23
+        # 两条（src_ip 127.0.0.1）。后来加 ATS 想放开局域网明文，反而踩坑：
+        # NSAllowsLocalNetworking 一出现，NSAllowsArbitraryLoads 会被系统忽略，
+        # 而 LocalNetworking 只覆盖 .local / 无点主机名，不覆盖 IP 字面量 ——
+        # 等于局域网没放开、公网的通行证还作废了。既然公网 HTTPS 本来就够用，
+        # 就把这两个键都去掉，回到那一版的干净状态。
         UIDeviceFamily:
           - 4
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: top.webchangming.watchstep.watchkitapp
-        COMPANION_BUNDLE_ID: top.webchangming.watchstep
+        PRODUCT_BUNDLE_IDENTIFIER: top.webchangming.step.watchkitapp
+        COMPANION_BUNDLE_ID: top.webchangming.step
         SKIP_INSTALL: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         CODE_SIGNING_ALLOWED: NO
