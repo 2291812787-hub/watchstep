@@ -13,8 +13,8 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "2.2"
-    CURRENT_PROJECT_VERSION: "12"
+    MARKETING_VERSION: "2.3"
+    CURRENT_PROJECT_VERSION: "13"
     SWIFT_VERSION: "5.0"
     # 自签路线：手动签名，不自动要描述文件
     CODE_SIGN_STYLE: Manual
@@ -56,6 +56,11 @@ targets:
       properties:
         CFBundleDisplayName: 催步
         CFBundleName: WatchStep
+        # 版本号必须和 iPhone 端一致：Apple 要求 companion app 与手表 app 的
+        # CFBundleShortVersionString / CFBundleVersion 相同，否则 installd 可能
+        # 拒绝安装或事后被 watchOS 移除。Xcode 会展开 $(...) 构建变量。
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # SwiftUI 单 target watchOS app（无 WatchKit Extension）必须声明 WKApplication=true，
         # 否则 installd 报 InvalidWatchKitApp 拒绝安装（"does not have a WKWatchKitApp or
         # WKApplication key set to true in its Info.plist"）。
