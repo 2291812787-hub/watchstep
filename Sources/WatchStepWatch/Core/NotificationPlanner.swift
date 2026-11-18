@@ -21,9 +21,17 @@ import UserNotifications
 final class NotificationPlanner {
     static let shared = NotificationPlanner()
 
-    /// 立刻弹的那条用这个 id（重复投递会互相顶掉，通知中心不会堆一串）。
+    /// 所有通知 id 的共同前缀（自检页靠它数「待发 N 条」）。
     static let baseID = "ws.nudge"
     /// 链上第 i 条。必须各用各的 id，否则系统里只能存在一条。
+    ///
+    /// 注意 `chainID(0)` **同时是「立刻弹」那条用的 id**（见 fireNow）。
+    /// 这是「一分钟收到三条」的修法，不是文案调整：
+    /// 以前 fireNow 用 `ws.nudge`、链用 `ws.nudge.c0…`，id 不同，于是
+    /// 「链上 c0 按点自己弹」和「前台 tick 判定该催了、再 fireNow 一条」
+    /// 会同时存在于系统里 —— 用户手腕上就是两条，再叠一次重建链就是三条。
+    /// 共用一个 id 之后，即时那条会原子替换掉同 id 的待发那条，
+    /// 「这一刻只可能有一条在响」变成物理事实，不靠时序、不靠节流。
     static func chainID(_ i: Int) -> String { "\(baseID).c\(i)" }
     /// 测试通知独立 id，不参与链对账，也不被 cancelAll 撤掉。
     static let testID = "ws.test"
@@ -117,6 +125,20 @@ final class NotificationPlanner {
         chain = fresh
     }
 
+    /// 把上一版留下的通知全撤掉（只撤我们自己的 id 前缀，不碰别的）。
+    ///
+    /// 主要目标：Q 版（2.4/14）的 `ws.nudge.relay` —— 它用 `repeats: true` 建进系统，
+    /// 自己无限期反复响，不显式撤就永远在。而 S 版回退到 2.0 之后代码里没有这个常量，
+    /// 等于没人能撤它。**换包不换系统状态，旧接力会跟着新版一起响**，
+    /// 用户看到的就是"新版每分钟三条"，其中一条根本不是新版发的。
+    func purgeLegacy() {
+        var ids: [String] = ["ws.nudge.relay", Self.baseID]
+        for i in 0..<(Self.maxSlots + 8) { ids.append(Self.chainID(i)) }
+        center.removePendingNotificationRequests(withIdentifiers: ids)
+        center.removeDeliveredNotifications(withIdentifiers: ids)
+        chain = []
+    }
+
     /// 立刻弹一条。只在 app 活着、且这一刻的数字是真的的时候用 ——
     /// 所以正文可以写准确步数。
     ///
@@ -125,14 +147,14 @@ final class NotificationPlanner {
     /// 现在只弹自己这一条（同 id 互相顶掉），链原样留着。
     func fireNow(body: String, title: String = "起来走走", now: Date = Date()) {
         lastDeliveredAt = now
-        center.removeDeliveredNotifications(withIdentifiers: [Self.baseID])
+        center.removeDeliveredNotifications(withIdentifiers: [Self.chainID(0)])
 
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
 
-        let request = UNNotificationRequest(identifier: Self.baseID, content: content, trigger: nil)
+        let request = UNNotificationRequest(identifier: Self.chainID(0), content: content, trigger: nil)
         center.add(request, withCompletionHandler: nil)
     }
 

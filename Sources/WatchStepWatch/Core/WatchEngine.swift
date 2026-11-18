@@ -54,6 +54,17 @@ final class WatchEngine: ObservableObject {
             return
         }
         booted = true
+        // 装上新包第一件事：把系统里属于我们、但不是这一版排的链全清掉。
+        //
+        // 为什么必须有这一步：Q 版（2.4/14）有一个「接力通知」ws.nudge.relay，
+        // 用的是 `UNTimeIntervalNotificationTrigger(repeats: true)` —— 建进去之后
+        // **自己反复响，永远不到期**，唯一的停法是被显式撤掉。而 S 版回退到 2.0 后
+        // 代码里根本没有这个 id，撤不到它。于是换包不换系统状态，旧接力照样响：
+        // 用户以为新版乱报，其实是上一版留下的东西在按点震。
+        //
+        // 同理会残留上一版排的 c0…c61。全部按已知 id 撤一遍再重排，
+        // 不去调 removeAll（那会连会话续期提醒一起清掉）。
+        NotificationPlanner.shared.purgeLegacy()
         // 进前台就把通知中心里已经弹过的清掉：该响的时候都响过了、也震过了，
         // 堆着只会变成「一打开一堆消息」。（待发的整条链绝不动 —— 那是后台继续催的命根。）
         NotificationPlanner.shared.clearDeliveredNotificationCenter()
