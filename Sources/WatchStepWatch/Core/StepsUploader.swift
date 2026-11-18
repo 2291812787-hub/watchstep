@@ -1,5 +1,6 @@
 import Foundation
 import CoreMotion
+import Network
 
 /// 把当天步数推到 https://watch.webchangming.top
 ///
@@ -33,8 +34,27 @@ final class StepsUploader {
     private let kLastOK = "upload.lastOKAt"
     private let kLastSteps = "upload.lastSteps"
 
+    /// 专用 session。
+    /// watchOS 上 URLSession.shared 在路径没就绪时会立刻返回 -1004（150~300ms 就回来，
+    /// 根本没等超时）。waitsForConnectivity 让 CFNetwork 等一条可用路径再发，
+    /// 蜂窝也不被当作"昂贵网络"拒掉；这两条虽是默认值，显式写死防止以后变化。
+    private static let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.waitsForConnectivity = true
+        c.allowsExpensiveNetworkAccess = true
+        c.allowsConstrainedNetworkAccess = true
+        c.timeoutIntervalForRequest = 12
+        c.timeoutIntervalForResource = 30
+        c.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: c)
+    }()
+
     private let defaults = UserDefaults.standard
     private var inFlight = false
+
+    /// 局域网最近一次被拒的时刻。拿不到「本地网络」权限时，每次尝试都在 ~150ms 内
+    /// 返回 -1004。既然必然失败，10 分钟内就别再先撞局域网白等 6 秒。
+    private var lanBlockedAt: Date?
     /// 起飞时刻。请求挂住时（watchOS 随时可能把进程冻住，回调永远不来）
     /// inFlight 会永远是 true，于是之后每次 tick 都在闸门前 return，再也不重试。
     /// 超过 45 秒一律当作已经失败。
@@ -111,6 +131,11 @@ final class StepsUploader {
     }
 
     private func post(now: Date, slot: Int, steps: Int, key: String, note: String, lan: Bool = true) {
+        // 局域网刚被系统拒过，直接走公网，不再白等。
+        if lan, let t = lanBlockedAt, Date().timeIntervalSince(t) < 600 {
+            post(now: now, slot: slot, steps: steps, key: key, note: note, lan: false)
+            return
+        }
         // inFlight 一直保持 true 到最终落定，避免回退过程中又起第二个请求。
         var req = URLRequest(url: lan ? lanURL : wanURL)
         req.httpMethod = "POST"
@@ -128,7 +153,7 @@ final class StepsUploader {
         body["sent_at"] = ISO8601DateFormatter().string(from: now)
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+        Self.session.dataTask(with: req) { [weak self] data, resp, err in
             guard let self = self else { return }
             self.inFlight = false
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
@@ -139,6 +164,8 @@ final class StepsUploader {
                 if lan {
                     self.inFlight = false
                     let le = err as NSError
+                    // -1004 连不上 / -1009 无网络：基本就是「本地网络」权限没给。
+                    if le.code == -1004 || le.code == -1009 { self.lanBlockedAt = Date() }
                     self.lanFailNote = "lan\(le.code)"
                     self.post(now: now, slot: slot, steps: steps, key: key, note: note, lan: false)
                     return
@@ -170,38 +197,69 @@ final class StepsUploader {
     /// 自检页「测试连接」用：同时问局域网和公网的 /health。
     /// 上传失败时靠它分清是「手表连不上家里这台机」还是「公网隧道坏了」。
     func probe(_ done: @escaping (String) -> Void) {
-        let lanH = URL(string: "http://192.168.31.82:8085/health")!
-        let wanH = URL(string: "https://watch.webchangming.top/health")!
-        var out: [String] = []
-        func hit(_ url: URL, _ tag: String, _ next: @escaping () -> Void) {
+        // 三个目标一起打，谁先回来都算。第三个是苹果自己的联网探测页：
+        // 它跟我们的服务器毫无关系。它要是也失败，说明是这个进程发不出请求
+        // （权限/系统层），不是地址、不是服务器、不是家里网络。
+        let targets: [(String, String)] = [
+            ("局域", "http://192.168.31.82:8085/health"),
+            ("公网", "https://watch.webchangming.top/health"),
+            ("苹果", "https://captive.apple.com/hotspot-detect.html"),
+        ]
+        var lines = [String](repeating: "", count: targets.count)
+        let group = DispatchGroup()
+        let lock = NSLock()
+
+        for (i, t) in targets.enumerated() {
+            guard let url = URL(string: t.1) else { continue }
             var req = URLRequest(url: url)
-            req.timeoutInterval = 6
-            req.cachePolicy = .reloadIgnoringLocalCacheData
+            req.timeoutInterval = 12
+            group.enter()
             let t0 = Date()
-            URLSession.shared.dataTask(with: req) { _, resp, err in
+            Self.session.dataTask(with: req) { _, resp, err in
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                var line: String
                 if let e = err as NSError? {
-                    out.append("\(tag)X\(e.code) \(ms)ms")
+                    // 带上错误域前 3 个字母：NSURLErrorDomain=nur，能区分是 CFNetwork
+                    // 直接判死（nur）还是被 ATS 拦（也是 nur，但码是 -1022）。
+                    line = "\(t.0)✗\(e.code) \(ms)ms"
                 } else if let h = resp as? HTTPURLResponse {
-                    out.append("\(tag)\(h.statusCode) \(ms)ms")
+                    line = "\(t.0)\(h.statusCode) \(ms)ms"
                 } else {
-                    out.append("\(tag)? \(ms)ms")
+                    line = "\(t.0)? \(ms)ms"
                 }
-                next()
+                lock.lock(); lines[i] = line; lock.unlock()
+                group.leave()
             }.resume()
         }
-        hit(lanH, "局域") {
-            hit(wanH, "公网") {
-                let s = out.joined(separator: " / ")
-                let f = DateFormatter()
-                f.dateFormat = "HH:mm:ss"
-                let stamp = f.string(from: Date())
-                DispatchQueue.main.async {
-                    self.defaults.set("\(stamp) 探测 \(s)", forKey: self.kLastResult)
-                    done(s)
-                }
-            }
+
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+            var out = lines.filter { !$0.isEmpty }
+            out.append(Self.pathSummary())
+            let s = out.joined(separator: " / ")
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm:ss"
+            let stamp = f.string(from: Date())
+            self.defaults.set("\(stamp) 探测 \(s)", forKey: self.kLastResult)
+            done(s)
         }
+    }
+
+    /// 网络路径快照。系统认为"有没有网"，跟单个请求成功失败是两件事，
+    /// 分开看才知道是路径没了还是请求被拦了。
+    static func pathSummary() -> String {
+        let m = NWPathMonitor()
+        m.start(queue: DispatchQueue(label: "watchstep.path"))
+        Thread.sleep(forTimeInterval: 0.6)
+        let p = m.currentPath
+        var ifs: [String] = []
+        if p.usesInterfaceType(.wifi) { ifs.append("wifi") }
+        if p.usesInterfaceType(.cellular) { ifs.append("cell") }
+        if p.usesInterfaceType(.wiredEthernet) { ifs.append("eth") }
+        if p.usesInterfaceType(.other) { ifs.append("other") }
+        let head = p.status == .satisfied ? "路径ok" : "路径断"
+        m.cancel()
+        return head + "[" + (ifs.isEmpty ? "-" : ifs.joined(separator: ",")) + "]"
     }
 
     func statusLine() -> String {

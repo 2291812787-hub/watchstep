@@ -13,8 +13,8 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "2.7"
-    CURRENT_PROJECT_VERSION: "17"
+    MARKETING_VERSION: "2.8"
+    CURRENT_PROJECT_VERSION: "18"
     SWIFT_VERSION: "5.0"
     # 自签路线：手动签名，不自动要描述文件
     CODE_SIGN_STYLE: Manual
@@ -75,12 +75,17 @@ targets:
         # 失败才回退到 Cloudflare 域名（HTTPS）。局域网那条是明文 HTTP，默认被 ATS 拦，
         # 而 IP 字面量没法用 NSExceptionDomains 配，只能整体放开。
         # 这个 app 只自签给自己用，不进 App Store，没有审核约束。
+        #
+        # 关键：不要再加 NSAllowsLocalNetworking。iOS 10 / watchOS 3.2 起，
+        # 只要这三把钥匙（ForMedia / InWebContent / LocalNetworking）出现任意一把，
+        # NSAllowsArbitraryLoads 就会被**忽略**，于是明文打到 IP 上又被 ATS 拦回去。
+        # 而且 LocalNetworking 只覆盖 .local / 无点单标签主机名，不覆盖 IP 字面量，
+        # 加了它既救不了局域网、还把 ArbitraryLoads 废掉。只留 ArbitraryLoads。
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-          NSAllowsLocalNetworking: true
         # iOS 14 起访问局域网设备（192.168.x.x）需要「本地网络」权限。
-        # 没有这条描述串时系统不会弹授权框，连接被直接阻断且报错模糊
-        # （通常是 -1009 / errno 51），从日志上完全看不出原因。
+        # 没有这条描述串时系统不弹授权框、直接阻断（-1004，150ms 就返回）；
+        # 有它才会在手表上弹一次「是否允许访问本地网络」。
         NSLocalNetworkUsageDescription: 在家里直接连电脑上传步数，不经过公网。
         UIDeviceFamily:
           - 4
