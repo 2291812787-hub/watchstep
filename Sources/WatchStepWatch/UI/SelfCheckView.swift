@@ -1,9 +1,13 @@
 import SwiftUI
 
 /// 验收工具。装上去第一件事就是跑它，把七条验收里的关键不变量摊在屏幕上。
+/// 外加一块「网络诊断」：权限开关没有 API 可读，只能靠实测反推，所以把测出来的
+/// 路径 / 三个目标的连通性 / 底层 errno 全摆出来，让人一眼能看出卡在哪一层。
 struct SelfCheckView: View {
     @EnvironmentObject var engine: WatchEngine
     @Environment(\.dismiss) private var dismiss
+
+    @State private var netLines: [String] = []
 
     var body: some View {
         ScrollView {
@@ -25,6 +29,29 @@ struct SelfCheckView: View {
                 Button("重新自检") { engine.runSelfCheck() }
                     .font(.system(size: 11))
 
+                Divider().padding(.vertical, 3)
+
+                Text("网络诊断")
+                    .font(.system(size: 13, weight: .bold))
+
+                if netLines.isEmpty {
+                    Text("点「测网络」").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+
+                ForEach(netLines.indices, id: \.self) { i in
+                    Text(netLines[i])
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(bad(netLines[i]) ? .red : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Button("测网络") {
+                    netLines = ["测…"]
+                    NetDiag.run { lines in netLines = lines }
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.green)
+
                 Button("测试上传通道") {
                     StepsUploader.shared.probe { _ in engine.runSelfCheck() }
                 }
@@ -41,5 +68,16 @@ struct SelfCheckView: View {
             }
             .padding(.horizontal, 2)
         }
+        .onAppear {
+            if netLines.isEmpty {
+                netLines = ["测…"]
+                NetDiag.run { lines in netLines = lines }
+            }
+        }
+    }
+
+    /// 失败和断网标红，一行一个字都别糊在一起。
+    private func bad(_ line: String) -> Bool {
+        line.contains("✗") || line.contains("断") || line.contains("未知")
     }
 }

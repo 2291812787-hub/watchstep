@@ -1,6 +1,5 @@
 import Foundation
 import CoreMotion
-import Network
 
 /// 把当天步数推到 https://watch.webchangming.top
 ///
@@ -38,7 +37,7 @@ final class StepsUploader {
     /// watchOS 上 URLSession.shared 在路径没就绪时会立刻返回 -1004（150~300ms 就回来，
     /// 根本没等超时）。waitsForConnectivity 让 CFNetwork 等一条可用路径再发，
     /// 蜂窝也不被当作"昂贵网络"拒掉；这两条虽是默认值，显式写死防止以后变化。
-    private static let session: URLSession = {
+    static let session: URLSession = {
         let c = URLSessionConfiguration.ephemeral
         c.waitsForConnectivity = true
         c.allowsExpensiveNetworkAccess = true
@@ -197,69 +196,15 @@ final class StepsUploader {
     /// 自检页「测试连接」用：同时问局域网和公网的 /health。
     /// 上传失败时靠它分清是「手表连不上家里这台机」还是「公网隧道坏了」。
     func probe(_ done: @escaping (String) -> Void) {
-        // 三个目标一起打，谁先回来都算。第三个是苹果自己的联网探测页：
-        // 它跟我们的服务器毫无关系。它要是也失败，说明是这个进程发不出请求
-        // （权限/系统层），不是地址、不是服务器、不是家里网络。
-        let targets: [(String, String)] = [
-            ("局域", "http://192.168.31.82:8085/health"),
-            ("公网", "https://watch.webchangming.top/health"),
-            ("苹果", "https://captive.apple.com/hotspot-detect.html"),
-        ]
-        var lines = [String](repeating: "", count: targets.count)
-        let group = DispatchGroup()
-        let lock = NSLock()
-
-        for (i, t) in targets.enumerated() {
-            guard let url = URL(string: t.1) else { continue }
-            var req = URLRequest(url: url)
-            req.timeoutInterval = 12
-            group.enter()
-            let t0 = Date()
-            Self.session.dataTask(with: req) { _, resp, err in
-                let ms = Int(Date().timeIntervalSince(t0) * 1000)
-                var line: String
-                if let e = err as NSError? {
-                    // 带上错误域前 3 个字母：NSURLErrorDomain=nur，能区分是 CFNetwork
-                    // 直接判死（nur）还是被 ATS 拦（也是 nur，但码是 -1022）。
-                    line = "\(t.0)✗\(e.code) \(ms)ms"
-                } else if let h = resp as? HTTPURLResponse {
-                    line = "\(t.0)\(h.statusCode) \(ms)ms"
-                } else {
-                    line = "\(t.0)? \(ms)ms"
-                }
-                lock.lock(); lines[i] = line; lock.unlock()
-                group.leave()
-            }.resume()
-        }
-
-        group.notify(queue: .main) { [weak self] in
-            guard let self = self else { return }
-            var out = lines.filter { !$0.isEmpty }
-            out.append(Self.pathSummary())
-            let s = out.joined(separator: " / ")
+        // 具体测什么、怎么判读，全在 NetDiag 里，这里只负责落盘和回报。
+        NetDiag.run { lines in
             let f = DateFormatter()
             f.dateFormat = "HH:mm:ss"
             let stamp = f.string(from: Date())
+            let s = lines.joined(separator: "；")
             self.defaults.set("\(stamp) 探测 \(s)", forKey: self.kLastResult)
             done(s)
         }
-    }
-
-    /// 网络路径快照。系统认为"有没有网"，跟单个请求成功失败是两件事，
-    /// 分开看才知道是路径没了还是请求被拦了。
-    static func pathSummary() -> String {
-        let m = NWPathMonitor()
-        m.start(queue: DispatchQueue(label: "watchstep.path"))
-        Thread.sleep(forTimeInterval: 0.6)
-        let p = m.currentPath
-        var ifs: [String] = []
-        if p.usesInterfaceType(.wifi) { ifs.append("wifi") }
-        if p.usesInterfaceType(.cellular) { ifs.append("cell") }
-        if p.usesInterfaceType(.wiredEthernet) { ifs.append("eth") }
-        if p.usesInterfaceType(.other) { ifs.append("other") }
-        let head = p.status == .satisfied ? "路径ok" : "路径断"
-        m.cancel()
-        return head + "[" + (ifs.isEmpty ? "-" : ifs.joined(separator: ",")) + "]"
     }
 
     func statusLine() -> String {
