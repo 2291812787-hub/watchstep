@@ -120,6 +120,9 @@ final class WatchEngine: ObservableObject {
         // 走够前的旧账，就会先发一条"起来走动"、再发一条"已满 200 步"。
         if force { StepReader.shared.invalidateCache() }
 
+        // 步数上报：到点之后的第一次 tick 补发，每个时点只发一次（见 StepsUploader）
+        StepsUploader.shared.tickIfNeeded(now: now)
+
         // 只看最近一个窗口，不是"从上次归零到现在的累计"。
         //
         // 累计口径是这一整轮的病根：锚点只在走够时推进，所以只要你一直没在
@@ -779,6 +782,8 @@ final class WatchEngine: ObservableObject {
                     let shown = planned.map { fm.string(from: $0) }.joined(separator: " ")
                     lines.append("· 排定：" + shown)
                 }
+
+                lines.append(StepsUploader.shared.statusLine())
 
                 self.selfCheckLog = lines
             }
