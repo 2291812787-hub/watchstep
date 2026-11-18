@@ -402,7 +402,14 @@ final class WatchEngine: ObservableObject {
             first = deadline
         } else {
             let base = AnchorStore.shared.lastNudgeAt ?? deadline
-            first = max(base.addingTimeInterval(cfg.tick), now.addingTimeInterval(5))
+            // 错过了就等一整个间隔。
+            //
+            // 以前这里是 now + 5 秒的"赶紧补一条"。而 watchOS 会反复杀进程再拉起
+            // （抬腕、步数变化、常驻会话重建都会），每次拉起 chain 都是空的、磁盘上的
+            // lastNudgeAt 却还在 → 于是每次重启都排一条 5 秒后的通知，几秒响一个。
+            // 用户看到的就是「开头密集、后面才稳」。
+            // 等一个完整间隔，最坏只是晚 60 秒，绝不会多数一条。
+            first = max(base.addingTimeInterval(cfg.tick), now.addingTimeInterval(cfg.tick))
         }
 
         var fires: [Date] = []

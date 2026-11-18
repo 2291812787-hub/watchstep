@@ -49,14 +49,6 @@ final class NotificationPlanner {
     /// 最近一次真正送出去的时刻（链上某条，或 app 活着时立刻弹的那条）。
     private(set) var lastDeliveredAt: Date?
 
-    /// 当前链上每一条的正文，与 chain 一一对应。
-    /// 用来判断「时刻没变、但数字变了」—— 只比触发时刻的话，人一边走一边看，
-    /// 正文会永远停在第一次排程的快照上。
-    private var chainBodies: [String] = []
-
-    /// 上次真正重挂整条链的时刻，用来节流。
-    private var lastChainRebuild: Date = .distantPast
-
     var nextFireAt: Date? { chain.first?.fireAt }
     var chainCount: Int { chain.count }
 
@@ -101,22 +93,13 @@ final class NotificationPlanner {
         // 只要还在未来就得排。以前这里是 `> 1`，把「刚过去半秒」的 deadline
         // 一起丢掉 —— 那正是 5 分钟那条从没排进去的原因。
         let want = fires.filter { $0.timeIntervalSince(now) > 0.5 }.sorted()
-        let bodies = want.map { body($0) }
 
         if want.count == chain.count {
             var same = true
             for (i, w) in want.enumerated() {
                 if abs(w.timeIntervalSince(chain[i].fireAt)) > 2 { same = false; break }
             }
-            if same {
-                // 时刻没变，但**正文可能变了**（你正在走，步数在涨）。
-                // 正文是排进系统那一刻就冻死的，不重排就永远停在第一次的快照上：
-                // 用户走了 8 步，抬腕看到的还是半小时前的「还差 52 步」，要等
-                // 走够重置网格才会变准。这里补上正文比对，数字才会跟着人走。
-                if bodies == chainBodies { return }
-                // 别每个 tick 都重挂 60 条（30 秒一次太频繁，也容易招系统限流）。
-                if now.timeIntervalSince(lastChainRebuild) < 55 { return }
-            }
+            if same { return }
         }
 
         // **先加后删**。同 id 的 add 是原子替换，所以任何一刻系统里都有通知排着。
@@ -152,8 +135,6 @@ final class NotificationPlanner {
         }
 
         chain = fresh
-        chainBodies = bodies
-        lastChainRebuild = now
     }
 
     /// 把上一版留下的通知全撤掉（只撤我们自己的 id 前缀，不碰别的）。
@@ -168,7 +149,6 @@ final class NotificationPlanner {
         center.removePendingNotificationRequests(withIdentifiers: ids)
         center.removeDeliveredNotifications(withIdentifiers: ids)
         chain = []
-        chainBodies = []
     }
 
     /// 立刻弹一条。只在 app 活着、且这一刻的数字是真的的时候用 ——
@@ -198,7 +178,6 @@ final class NotificationPlanner {
         center.removePendingNotificationRequests(withIdentifiers: ids)
         center.removeDeliveredNotifications(withIdentifiers: ids)
         chain = []
-        chainBodies = []
     }
 
     /// 清空通知中心里已经弹过的那些，不动待发的。
