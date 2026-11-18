@@ -58,6 +58,18 @@ struct SelfCheckView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.green)
 
+                Text("通知")
+                    .font(.system(size: 13, weight: .bold))
+
+                Text("授权：\(engine.notificationAuth)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(engine.notificationAuth == "已允许" ? .green : .red)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("重新请求通知授权") { engine.requestNotificationAuth() }
+                    .font(.system(size: 11))
+                    .foregroundStyle(.yellow)
+
                 Button("测试通知 15 秒后") { engine.testNotificationNow() }
                     .font(.system(size: 11))
                     .foregroundStyle(.blue)

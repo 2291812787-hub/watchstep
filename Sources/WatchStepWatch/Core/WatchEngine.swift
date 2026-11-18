@@ -570,6 +570,16 @@ final class WatchEngine: ObservableObject {
         }
     }
 
+    func requestNotificationAuth() {
+        selfCheckLog.insert("· 手动请求通知授权", at: 0)
+        NotificationPlanner.shared.requestAuthorization()
+        NotificationPlanner.shared.authorizationStatus { [weak self] s in
+            guard let self = self else { return }
+            self.notificationAuth = s
+            self.selfCheckLog.insert("· 授权状态：\(s)", at: 0)
+        }
+    }
+
     func runSelfCheck() {
         let gen = UUID()
         selfCheckGen = gen
