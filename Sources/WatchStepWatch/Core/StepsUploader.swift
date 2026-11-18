@@ -39,6 +39,9 @@ final class StepsUploader {
     /// inFlight 会永远是 true，于是之后每次 tick 都在闸门前 return，再也不重试。
     /// 超过 45 秒一律当作已经失败。
     private var inFlightAt: Date?
+    /// 局域网那次失败的原因。LAN 失败会立刻改走公网，只有公网也失败才落结果，
+    /// 所以必须把 LAN 的失败码暂存下来，否则诊断信息丢一半。
+    private var lanFailNote: String?
     private let pedometer = CMPedometer()
 
     private static let dayFmt: DateFormatter = {
@@ -135,11 +138,15 @@ final class StepsUploader {
                 // 家里 WiFi 永远优先，出门（蜂窝）时第一次就落到公网，只多花 6 秒。
                 if lan {
                     self.inFlight = false
+                    let le = err as NSError
+                    self.lanFailNote = "lan\(le.code)"
                     self.post(now: now, slot: slot, steps: steps, key: key, note: note, lan: false)
                     return
                 }
                 let ns = err as NSError
-                self.defaults.set("\(stamp) 失败 slot\(slot) net code\(ns.code) \(err.localizedDescription)",
+                let pre = self.lanFailNote.map { "\($0)→" } ?? ""
+                self.lanFailNote = nil
+                self.defaults.set("\(stamp) 失败 slot\(slot) \(pre)net code\(ns.code) \(err.localizedDescription)",
                                   forKey: self.kLastResult)
                 return
             }
@@ -159,6 +166,43 @@ final class StepsUploader {
     }
 
     // MARK: - 自检
+
+    /// 自检页「测试连接」用：同时问局域网和公网的 /health。
+    /// 上传失败时靠它分清是「手表连不上家里这台机」还是「公网隧道坏了」。
+    func probe(_ done: @escaping (String) -> Void) {
+        let lanH = URL(string: "http://192.168.31.82:8085/health")!
+        let wanH = URL(string: "https://watch.webchangming.top/health")!
+        var out: [String] = []
+        func hit(_ url: URL, _ tag: String, _ next: @escaping () -> Void) {
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 6
+            req.cachePolicy = .reloadIgnoringLocalCacheData
+            let t0 = Date()
+            URLSession.shared.dataTask(with: req) { _, resp, err in
+                let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                if let e = err as NSError? {
+                    out.append("\(tag)X\(e.code) \(ms)ms")
+                } else if let h = resp as? HTTPURLResponse {
+                    out.append("\(tag)\(h.statusCode) \(ms)ms")
+                } else {
+                    out.append("\(tag)? \(ms)ms")
+                }
+                next()
+            }.resume()
+        }
+        hit(lanH, "局域") {
+            hit(wanH, "公网") {
+                let s = out.joined(separator: " / ")
+                let f = DateFormatter()
+                f.dateFormat = "HH:mm:ss"
+                let stamp = f.string(from: Date())
+                DispatchQueue.main.async {
+                    self.defaults.set("\(stamp) 探测 \(s)", forKey: self.kLastResult)
+                    done(s)
+                }
+            }
+        }
+    }
 
     func statusLine() -> String {
         let sent = defaults.string(forKey: kLastSent) ?? "从未"

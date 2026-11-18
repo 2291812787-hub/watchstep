@@ -13,8 +13,8 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "2.6"
-    CURRENT_PROJECT_VERSION: "16"
+    MARKETING_VERSION: "2.7"
+    CURRENT_PROJECT_VERSION: "17"
     SWIFT_VERSION: "5.0"
     # 自签路线：手动签名，不自动要描述文件
     CODE_SIGN_STYLE: Manual
@@ -78,6 +78,10 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
+        # iOS 14 起访问局域网设备（192.168.x.x）需要「本地网络」权限。
+        # 没有这条描述串时系统不会弹授权框，连接被直接阻断且报错模糊
+        # （通常是 -1009 / errno 51），从日志上完全看不出原因。
+        NSLocalNetworkUsageDescription: 在家里直接连电脑上传步数，不经过公网。
         UIDeviceFamily:
           - 4
     settings:

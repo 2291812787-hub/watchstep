@@ -25,6 +25,12 @@ struct SelfCheckView: View {
                 Button("重新自检") { engine.runSelfCheck() }
                     .font(.system(size: 11))
 
+                Button("测试上传通道") {
+                    StepsUploader.shared.probe { _ in engine.runSelfCheck() }
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.green)
+
                 Button("测试通知 15 秒后") { engine.testNotificationNow() }
                     .font(.system(size: 11))
                     .foregroundStyle(.blue)
