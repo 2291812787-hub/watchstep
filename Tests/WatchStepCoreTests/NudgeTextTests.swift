@@ -71,10 +71,10 @@ final class NudgeTextTests: XCTestCase {
                                            tickMinutes: 1, approximate: true)
         let live = NudgeText.reminder(targetSteps: 200, steps: 63, sittingMinutes: 31,
                                       tickMinutes: 1)
-        // 预排版刻意不带步数：它进系统后内容就冻住了，等真弹出来用户可能已经
-        // 走够 200 步，那时"还差约 137 步"就是在打自己的脸。
-        XCTAssertEqual(scheduled, "该走走了 · 已坐 31 分钟，1 分钟后再提醒你一次。")
-        XCTAssertFalse(scheduled.contains("步"), "预排通知不能出现任何步数说法")
+        // 预排版要说"最多还差 137 步"。步数只增不减 => 实际还差必然 <= 快照值，
+        // 所以这句永远成立，既给了具体数字又不会自相矛盾。
+        XCTAssertEqual(scheduled, "最多还差 137 步 · 已坐 31 分钟，1 分钟后再提醒你一次。")
+        XCTAssertTrue(scheduled.contains("最多"), "预排通知必须标明是上限")
         XCTAssertEqual(live, "还差 137 步 · 已坐 31 分钟，1 分钟后再提醒你一次。")
         XCTAssertNotEqual(scheduled, live, "排程与立刻弹的措辞要能区分")
     }

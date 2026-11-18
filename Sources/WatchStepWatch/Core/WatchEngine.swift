@@ -464,7 +464,7 @@ final class WatchEngine: ObservableObject {
         if now >= deadline {
             if cfg.isActive(at: now.addingTimeInterval(3600)) {
                 if !NotificationPlanner.shared.relayArmed {
-                    let body = "还没走够 \(cfg.targetSteps) 步 · 起来走动"
+                    let body = NudgeText.relay(targetSteps: cfg.targetSteps, steps: steps)
                     NotificationPlanner.shared.armRelay(
                         interval: step,
                         title: NotificationPlanner.title,

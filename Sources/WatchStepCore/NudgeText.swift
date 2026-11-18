@@ -27,20 +27,32 @@ enum NudgeText {
         guard let s = steps else {
             return "该走走了 · 已坐 \(sit) 分钟，\(every)。"
         }
-        // 预排通知进系统之后内容就改不了了。步数是排程那一刻的快照，
-        // 而它可能几十分钟后才弹 —— 那时用户可能早已走够 200 步。
-        // 写着"还差约 137 步"就是在打自己的脸（真走够了还催），
-        // 加"约"也救不回来。所以预排那条**一个步数都不说**：
-        // 只报能算准的（坐了多久）+ 让它起身。
-        // 要精确数字的机会在 App 活着的时候，那条走 fireNow。
-        if approximate {
-            return "该走走了 · 已坐 \(sit) 分钟，\(every)。"
-        }
+        // 预排/接力通知进系统之后内容就改不了了，步数是排程那一刻的快照。
+        // 但步数**只增不减**，所以「实际还差」必然 ≤ 快照算出的 remain。
+        // 于是「最多还差 N 步」永远成立 —— 既给了用户要的具体数字，
+        // 又不会像「还差约 137 步」那样在他其实已经走够时自打脸。
         let remain = max(0, target - s)
         if remain == 0 {
             return "已满 \(target) 步，重新开始计时。"
         }
+        if approximate {
+            return "最多还差 \(remain) 步 · 已坐 \(sit) 分钟，\(every)。"
+        }
         return "还差 \(remain) 步 · 已坐 \(sit) 分钟，\(every)。"
+    }
+
+    /// 接力通知（`repeats`，无限重复）。内容永久冻结，所以只能放「永远成立」的信息：
+    /// 最多还差 N 步（步数只增 → 恒成立）。不能放「已坐 M 分钟」，那个会随时间变假。
+    static func relay(targetSteps: Int, steps: Int?) -> String {
+        let target = max(1, targetSteps)
+        guard let s = steps else {
+            return "该走走了 · 起来走动"
+        }
+        let remain = max(0, target - s)
+        if remain == 0 {
+            return "已满 \(target) 步 · 起来走动"
+        }
+        return "最多还差 \(remain) 步 · 起来走动"
     }
 
     /// "1 分钟后再提醒你一次" / "5 分钟后再提醒你一次"
