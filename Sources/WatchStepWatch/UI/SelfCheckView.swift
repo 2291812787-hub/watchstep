@@ -7,6 +7,15 @@ struct SelfCheckView: View {
     @EnvironmentObject var engine: WatchEngine
     @Environment(\.dismiss) private var dismiss
 
+    /// 版本行：营销版本 + 构建号 + CI 构建标识。
+    /// 直接从 Bundle 读，不依赖 CI 生成的 BuildInfo 字段。
+    private var versionLine: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "v\(short)(\(build)) · \(BuildInfo.stamp)"
+    }
+
     @State private var netLines: [String] = []
 
     var body: some View {
@@ -14,6 +23,16 @@ struct SelfCheckView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("自检")
                     .font(.system(size: 14, weight: .bold))
+
+                // 常驻显示版本号，不依赖"重新自检"按钮。
+                // 之前只把构建号塞在 selfCheckLog 里，而那个日志要点按钮才有内容，
+                // 结果界面上永远看不到自己装的是哪个版本 —— 装错包也没法第一时间发现。
+                // 版本号直接从 Bundle 读：BuildInfo.swift 每次编译都会被 CI 覆写
+                // （只留 stamp 和 sha），往里加字段等于白加。
+                Text(versionLine)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 ForEach(engine.selfCheckLog, id: \.self) { line in
                     Text(line)

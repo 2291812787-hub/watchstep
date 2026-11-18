@@ -707,7 +707,11 @@ final class WatchEngine: ObservableObject {
 
         // 0. 构建标识放在最前面：装上之后第一眼就能确认跑的是哪个包。
         //    以前三个包的 CFBundleVersion 全是 1.0(1)，装了旧包也看不出来。
-        log.append("构建 \(BuildInfo.stamp)")
+        //    版本号从 Bundle 读（Bundle.main 在 watch app 里就是 watch app 自己），
+        //    不走 BuildInfo —— 那个文件每次编译都被 CI 覆写，加字段等于白加。
+        let sv = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let bv = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        log.append("构建 \(sv)(\(bv)) · \(BuildInfo.stamp)")
 
         // 0.5 运行痕迹：这是判断"到底死了没有"的唯一硬证据。
         //     bg = 后台检查次数。它一直是 0 就说明进程在后台根本没醒过。
