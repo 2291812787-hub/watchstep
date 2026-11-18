@@ -20,6 +20,23 @@ final class StepsUploader {
     private let endpoint = URL(string: "https://watch.webchangming.top/steps")!
     private let token = "c7bb1f13a7b29c53e81836d66a6afded"
 
+    /// 专用 session：**必须** waitsForConnectivity = true。
+    ///
+    /// 这台手表的路径状态会波动：NWPathMonitor 经常报「无网卡」，但同一时刻
+    /// 实测三个目标全 200（3.1 的截图就是这样）。把 waitsForConnectivity 关掉后，
+    /// 一旦路径被判未就绪，请求立刻被拒，表现为 150ms 就返回 -1004，连
+    /// captive.apple.com 都连不上 —— 看起来像"全断"，其实网络是好的，只是没人等。
+    ///
+    /// 之前那个 38.9 秒挂死是另一回事：等路径期间 timeoutIntervalForRequest
+    /// 不生效，必须靠 timeoutIntervalForResource 兜底。所以两个都设。
+    static let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.waitsForConnectivity = true
+        c.timeoutIntervalForRequest = 20
+        c.timeoutIntervalForResource = 30
+        return URLSession(configuration: c)
+    }()
+
     /// 每天推送的时点（本地时区）
     /// 8:00–23:00 每小时整点，末尾补 23:30。
     /// 原来只有 6 个点（9/12/15/18/21/23:30）：手表靠系统唤醒，某个点醒不来就少报
@@ -132,7 +149,7 @@ final class StepsUploader {
         body["sent_at"] = ISO8601DateFormatter().string(from: now)
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+        Self.session.dataTask(with: req) { [weak self] data, resp, err in
             guard let self = self else { return }
             self.inFlight = false
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0

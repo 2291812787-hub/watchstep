@@ -67,13 +67,22 @@ enum NetDiag {
         return parts.isEmpty ? "接口 无IPv4" : "接口 " + parts.joined(separator: " ")
     }
 
-    /// 探测必须快速失败。上传用的 session 若开了 waitsForConnectivity，
-    /// 没有可用路径时会一直等，把 150ms 的失败拖成 39 秒（实测过）。
+    /// 探测必须等路径，不能快速失败。
+    ///
+    /// 血泪教训：watchOS 上 NWPathMonitor 会报「断(无网卡)」，哪怕 en0 明明有
+    /// 192.168.31.x 的 IP、三个目标全 200 —— 这个信号不可信。而
+    /// waitsForConnectivity = false 时，CFNetwork 就按这个不可信的路径判定
+    /// 当场拒绝，表现为三个目标一起在 150ms 左右返回 -1004（连苹果都一样）。
+    ///
+    /// 所以这里改成等路径：网络其实是通的，等一下就能连上。
+    /// 用 timeoutIntervalForResource 兜底等待时长，避免挂死太久。
     static let probeSession: URLSession = {
         let c = URLSessionConfiguration.ephemeral
-        c.waitsForConnectivity = false
+        c.waitsForConnectivity = true
         c.timeoutIntervalForRequest = 8
-        c.timeoutIntervalForResource = 10
+        c.timeoutIntervalForResource = 15
+        c.allowsExpensiveNetworkAccess = true
+        c.allowsConstrainedNetworkAccess = true
         c.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: c)
     }()
