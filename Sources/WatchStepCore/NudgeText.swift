@@ -27,32 +27,27 @@ enum NudgeText {
         guard let s = steps else {
             return "该走走了 · 已坐 \(sit) 分钟，\(every)。"
         }
-        // 预排/接力通知进系统之后内容就改不了了，步数是排程那一刻的快照。
-        // 但步数**只增不减**，所以「实际还差」必然 ≤ 快照算出的 remain。
-        // 于是「最多还差 N 步」永远成立 —— 既给了用户要的具体数字，
-        // 又不会像「还差约 137 步」那样在他其实已经走够时自打脸。
+        // 预排通知进系统之后内容改不了，步数是排程那一刻的快照。
+        //
+        // 曾经写成「最多还差 N 步」，理由是"步数只增不减，所以实际还差 ≤ N"。
+        // 那是错的：判定用的是**滑动窗口**（只看最近 30 分钟），窗口往前挪时
+        // 早先那批步数会掉出窗口，实际还差可能比 N 更大 —— 「最多」变成了谎话。
+        // 现在如实按快照说，并且每条链通知都会在下一轮 tick 用新快照重排一次
+        //（见 NotificationPlanner.replaceChain 里对正文的比较）。
         let remain = max(0, target - s)
         if remain == 0 {
             return "已满 \(target) 步，重新开始计时。"
         }
-        if approximate {
-            return "最多还差 \(remain) 步 · 已坐 \(sit) 分钟，\(every)。"
-        }
         return "还差 \(remain) 步 · 已坐 \(sit) 分钟，\(every)。"
     }
 
-    /// 接力通知（`repeats`，无限重复）。内容永久冻结，所以只能放「永远成立」的信息：
-    /// 最多还差 N 步（步数只增 → 恒成立）。不能放「已坐 M 分钟」，那个会随时间变假。
-    static func relay(targetSteps: Int, steps: Int?) -> String {
-        let target = max(1, targetSteps)
-        guard let s = steps else {
-            return "该走走了 · 起来走动"
-        }
-        let remain = max(0, target - s)
-        if remain == 0 {
-            return "已满 \(target) 步 · 起来走动"
-        }
-        return "最多还差 \(remain) 步 · 起来走动"
+    /// 接力通知的正文（`repeats`，无限重复，**排进去之后一个字都改不了**）。
+    ///
+    /// 这里绝不能出现步数。以前它写「最多还差 N 步」，而 N 是挂上那一刻算出来的，
+    /// 之后你走到 200 步它还是那句 —— 用户看到的就是「一直重复说还差两百」。
+    /// 冻结的内容只能放恒成立的话。
+    static func relayFrozen(tickMinutes: Int) -> String {
+        "已到点 · 每 \(max(1, tickMinutes)) 分钟提醒一次，点开看还差多少"
     }
 
     /// "1 分钟后再提醒你一次" / "5 分钟后再提醒你一次"

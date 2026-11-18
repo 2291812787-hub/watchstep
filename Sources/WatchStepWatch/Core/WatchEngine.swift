@@ -249,13 +249,14 @@ final class WatchEngine: ObservableObject {
             // 分不清是走够了还是又催一次。
             // 条件不能只看 wasNudging：App 挂起时是那条预排通知替我们催的，
             // 此时 nudgingSince 仍是 nil，但用户确实已经被催过了 —— 漏掉他更困惑。
-            if wasNudging || delivered != nil {
-                NotificationPlanner.shared.fireNow(
-                    body: "已满 \(cfg.targetSteps) 步，重新开始计时",
-                    title: "走够了",
-                    now: now
-                )
-            }
+            // 达成**每次都告诉用户**。以前只在「正在催」或「刚被催过」时才发，
+            // 于是走够的那一刻屏幕上一片安静，只有一次很容易被忽略的轻震 ——
+            // 用户只记得「还在差 200」，得点进来才看到早就满了。这是另一半根因。
+            NotificationPlanner.shared.fireNow(
+                body: "已满 \(cfg.targetSteps) 步 · 本轮 \(Int(now.timeIntervalSince(anchor) / 60)) 分钟，重新开始计时",
+                title: "走够了",
+                now: now
+            )
             nudgesToday = AnchorStore.shared.nudgesToday
 
         case .nudge:
@@ -464,10 +465,15 @@ final class WatchEngine: ObservableObject {
         //
         // 只在「一小时之后还在生效时段内」时挂 —— repeats 触发器没法按时段
         // 自己停，跨夜挂上就是整夜响。时段末尾那一段继续用精确链兜着（它会自然停）。
+        // 接力只在「精确链自己撑不住」时才用。
+        // 62 条 × 5 分钟 = 5 小时，绰绰有余，用不着它；只有间隔调到 1–2 分钟时，
+        // 62 条只够 1 小时，才需要这条永不耗尽的兜底。
+        // 平时不用它的理由很硬：它的正文是冻结的，写进什么就一直是什么。
+        let coverage = step * Double(NotificationPlanner.maxSlots)
         if now >= deadline {
-            if cfg.isActive(at: now.addingTimeInterval(3600)) {
+            if cfg.isActive(at: now.addingTimeInterval(3600)), coverage < 7200 {
                 if !NotificationPlanner.shared.relayArmed {
-                    let body = NudgeText.relay(targetSteps: cfg.targetSteps, steps: steps)
+                    let body = NudgeText.relayFrozen(tickMinutes: Int(step / 60))
                     NotificationPlanner.shared.armRelay(
                         interval: step,
                         title: NotificationPlanner.title,
@@ -673,6 +679,17 @@ final class WatchEngine: ObservableObject {
         }
     }
 
+    /// 判定结果的中文说明（自检页要按人话显示，别把 enum 名甩上去）
+    var decisionText: String {
+        switch lastDecision {
+        case .unknown: return "读不到步数"
+        case .inactive: return "不在生效时段"
+        case .satisfied: return "已走够，该归零"
+        case .waiting: return "窗口内等待"
+        case .nudge: return "已到点，该催"
+        }
+    }
+
     func runSelfCheck() {
         var log: [String] = []
         let now = Date()
@@ -726,8 +743,9 @@ final class WatchEngine: ObservableObject {
                     lines.append(style)
                 }
 
-                // 4. 计步
+                // 4. 计步 —— 本轮到底读到多少步，这是「永远差 200」唯一的硬证据
                 lines.append(self.stepCountingAvailable ? "✓ 计步可用" : "✗ 设备不支持计步")
+                lines.append("· 本轮 \(self.stepsInWindow) / \(self.config.targetSteps) 步 · 判定：\(self.decisionText)")
 
                 // 5. 环境（电量/充电/摘下）与暂停原因
                 let env = self.surroundings
