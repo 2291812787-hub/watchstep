@@ -21,30 +21,53 @@ import UserNotifications
 final class NotificationPlanner {
     static let shared = NotificationPlanner()
 
-    /// 所有通知 id 的共同前缀（自检页靠它数「待发 N 条」）。
+    /// 立刻弹的那条用这个 id（重复投递会互相顶掉，通知中心不会堆一串）。
     static let baseID = "ws.nudge"
     /// 链上第 i 条。必须各用各的 id，否则系统里只能存在一条。
-    ///
-    /// 注意 `chainID(0)` **同时是「立刻弹」那条用的 id**（见 fireNow）。
-    /// 这是「一分钟收到三条」的修法，不是文案调整：
-    /// 以前 fireNow 用 `ws.nudge`、链用 `ws.nudge.c0…`，id 不同，于是
-    /// 「链上 c0 按点自己弹」和「前台 tick 判定该催了、再 fireNow 一条」
-    /// 会同时存在于系统里 —— 用户手腕上就是两条，再叠一次重建链就是三条。
-    /// 共用一个 id 之后，即时那条会原子替换掉同 id 的待发那条，
-    /// 「这一刻只可能有一条在响」变成物理事实，不靠时序、不靠节流。
     static func chainID(_ i: Int) -> String { "\(baseID).c\(i)" }
     /// 测试通知独立 id，不参与链对账，也不被 cancelAll 撤掉。
     static let testID = "ws.test"
+    /// 「接力」——一条 repeats 通知，**只占 1 个槽位，却无限期按间隔响**。
+    ///
+    /// 为什么需要它：预排上限是 64 条，我们排 60 条。间隔 1 分钟时这 60 条
+    /// 正好等于 60 分钟 —— 一小时后系统里就空了。而 watchOS 的后台刷新
+    /// 官方上限约 4 次/小时且不保证执行，所以「一小时后要手动点开才恢复」
+    /// 不是 App 被杀，是链用完了。
+    ///
+    /// repeats 的 trigger 只吃「每隔多久」，不吃「第一次在几点」，所以它
+    /// **不可能和精确链无缝拼接**：只能在进入催命期之后挂上，从那一刻起
+    /// 每间隔响一次。代价是正文冻结（不带分钟数），换来的是永不耗尽。
+    static let relayID = "ws.nudge.relay"
+    private static let relayKey = "ws.relayArmed"
 
     /// 统一标题。只有「走够了」那条会临时换成别的。
     static let title = "起来走走"
-    /// 一次最多排几条。系统上限是 64，留足余量。
-    static let maxSlots = 60
+    /// 一次最多排几条。系统上限是 64，留 2 个给接力（repeats）和测试通知。
+    static let maxSlots = 62
 
     private let center = UNUserNotificationCenter.current()
 
     /// 当前排进系统的那条链，按触发时刻升序。
     private(set) var chain: [(id: String, fireAt: Date)] = []
+
+    /// 每条链通知**排进去那一刻的正文**。
+    ///
+    /// 为什么必须记：通知一旦 add 进系统，正文就冻结了，只有用同一个 id 再 add
+    /// 才能换掉。以前 replaceChain 只比触发时刻 —— 时刻不变就直接 return，于是
+    /// 第一次排进去写的是「最多还差 200 步」，之后你走了 60 步、120 步，这句
+    /// 一个字节都不会变。用户看到的就是**永远差 200**。这里把正文一起比。
+    private var chainBodies: [String] = []
+
+    /// 上一次因为正文变化而重排的时刻。走路时步数每轮都在涨，若不加这道闸门，
+    /// 每 30 秒就要重排 62 条通知，费电也容易撞系统限流。
+    private var lastBodyRefreshAt: Date = .distantPast
+
+    /// 接力是否挂在系统里。存 UserDefaults —— App 被杀重启后照样知道，
+    /// 否则会重复挂一条、或者在走够时忘了撤，一直响到晚上。
+    var relayArmed: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.relayKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.relayKey) }
+    }
 
     /// 最近一次真正送出去的时刻（链上某条，或 app 活着时立刻弹的那条）。
     private(set) var lastDeliveredAt: Date?
@@ -58,28 +81,38 @@ final class NotificationPlanner {
         }
     }
 
+    /// 自检页手动触发：再问一次系统要授权，然后把最新状态读回来。
+    /// 用 ASK 是故意的——被拒之后重复请求不会再弹框，但能确认状态。
+    func requestAgain() {
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
     /// 链上最早那条有没有已经送出去。系统不会回调我们，只能靠触发时刻反推。
     ///
     /// 返回非 nil 说明那一条**已经震过手腕了** —— 调用方必须把它记成一次催命，
     /// 否则随后醒来的 tick 会因为"还没催过"再补一条，用户就同时收到两条。
     @discardableResult
     func consumeDelivered(now: Date = Date()) -> Date? {
-        // 把这次醒来之前已经到点的**全部**认掉，返回**最后一次**的真实投递时刻。
+        // 一次吃完**全部**已经过点的槽位，取最晚的那一个。
         //
-        // 以前只认一条、并且返回最早那条。后果是：App 睡过去 10 分钟、链上按点
-        // 响了 10 次，醒来只认出最早那一次，那个时刻 <= lastNudgeAt，
-        // 于是 `d > last` 不成立 —— 流程落进 else 分支的 canNudge，
-        // **明明刚刚响过，又立刻补发一条**。而步数一动 App 就被唤醒一次，
-        // 所以每一步变动都换来一条重复通知。用户看到的就是「不管前面发没发过，
-        // 它都再发一条」。全认完并取最新，lastNudgeAt 才等于真·最近一次，
-        // canNudge 自然为假。
-        var latest: Date? = nil
+        // 以前只 removeFirst 一条。App 睡过好几个间隔再醒来时，链上已经有 3、4 条
+        // 都过了点（真响过、也真震过），却只认账 1 条 —— 剩下的在内存里还算"待发"，
+        // 下一轮 reconcile 又按它们重排一遍，于是十几秒内连补好几条。
+        // 用户看到的就是「一分钟里隔几秒来一条」。
+        var latest: Date?
         while let first = chain.first, first.fireAt <= now {
-            chain.removeFirst()
             latest = first.fireAt
+            chain.removeFirst()
         }
         if let l = latest { lastDeliveredAt = l }
         return latest
+    }
+
+    /// 距上一次真正送出去还不到 minGap 就不许再发。
+    /// 这是物理层的兜底：上面的判定逻辑将来再改错，也不会连发。
+    func canDeliver(now: Date = Date(), minGap: TimeInterval) -> Bool {
+        guard let last = lastDeliveredAt else { return true }
+        return now.timeIntervalSince(last) >= minGap
     }
 
     /// 让系统里排着的那条链，正好等于 `fires`（未来时刻，升序）。
@@ -89,17 +122,28 @@ final class NotificationPlanner {
     ///
     /// `body` 按每一条自己的触发时刻生成：坐着的分钟数必须按它真正弹出的那一刻算，
     /// 用现在的时刻算会少报好几分钟。
-    func replaceChain(_ fires: [Date], now: Date = Date(), body: (Date) -> String) {
+    @discardableResult
+    func replaceChain(_ fires: [Date], now: Date = Date(), body: (Date) -> String) -> Bool {
         // 只要还在未来就得排。以前这里是 `> 1`，把「刚过去半秒」的 deadline
         // 一起丢掉 —— 那正是 5 分钟那条从没排进去的原因。
-        let want = fires.filter { $0.timeIntervalSince(now) > 0.5 }.sorted()
+        //
+        // 现在放宽到「过去 2.5 秒内还算数」：迟到的那个网格点必须补一条"马上就响"，
+        // 否则设 5 分钟会变成 6 分钟才响。重复的风险由调用方兜着 ——
+        // 引擎每轮先用 consumeDelivered 认账，再用 dedupeGap 把这些点剔掉。
+        let want = fires.filter { $0.timeIntervalSince(now) > -2.5 }.sorted()
+        let wantBodies = want.map(body)
 
         if want.count == chain.count {
-            var same = true
+            var sameTimes = true
             for (i, w) in want.enumerated() {
-                if abs(w.timeIntervalSince(chain[i].fireAt)) > 2 { same = false; break }
+                if abs(w.timeIntervalSince(chain[i].fireAt)) > 2 { sameTimes = false; break }
             }
-            if same { return }
+            if sameTimes {
+                // 时刻没变，但正文里带着步数和坐着的分钟数 —— 那才是用户看的东西。
+                // 正文一致就真没事可做，一致不了就得换（1 分钟最多换一次）。
+                if wantBodies == chainBodies { return false }
+                if now.timeIntervalSince(lastBodyRefreshAt) < 58 { return false }
+            }
         }
 
         // **先加后删**。同 id 的 add 是原子替换，所以任何一刻系统里都有通知排着。
@@ -135,20 +179,9 @@ final class NotificationPlanner {
         }
 
         chain = fresh
-    }
-
-    /// 把上一版留下的通知全撤掉（只撤我们自己的 id 前缀，不碰别的）。
-    ///
-    /// 主要目标：Q 版（2.4/14）的 `ws.nudge.relay` —— 它用 `repeats: true` 建进系统，
-    /// 自己无限期反复响，不显式撤就永远在。而 S 版回退到 2.0 之后代码里没有这个常量，
-    /// 等于没人能撤它。**换包不换系统状态，旧接力会跟着新版一起响**，
-    /// 用户看到的就是"新版每分钟三条"，其中一条根本不是新版发的。
-    func purgeLegacy() {
-        var ids: [String] = ["ws.nudge.relay", Self.baseID]
-        for i in 0..<(Self.maxSlots + 8) { ids.append(Self.chainID(i)) }
-        center.removePendingNotificationRequests(withIdentifiers: ids)
-        center.removeDeliveredNotifications(withIdentifiers: ids)
-        chain = []
+        chainBodies = wantBodies
+        lastBodyRefreshAt = now
+        return true
     }
 
     /// 立刻弹一条。只在 app 活着、且这一刻的数字是真的的时候用 ——
@@ -157,17 +190,62 @@ final class NotificationPlanner {
     /// **不再撤掉整条链**。以前它会把唯一那条兜底排期一起撤掉，于是每次实时
     /// 催命都会把后续提醒清空，App 一睡就再也不响 —— 这正是"点开才发现弹窗没弹"。
     /// 现在只弹自己这一条（同 id 互相顶掉），链原样留着。
-    func fireNow(body: String, title: String = "起来走走", now: Date = Date()) {
+    @discardableResult
+    func fireNow(body: String, title: String = "起来走走", now: Date = Date(),
+                 minGap: TimeInterval = 0) -> Bool {
+        // minGap 是最后一道物理闸门。以前没有任何闸门：判定逻辑一抖，
+        // 这里就再弹一条，用户手腕上几十秒内收到好几条一样的。
+        if minGap > 0, !canDeliver(now: now, minGap: minGap) {
+            return false
+        }
         lastDeliveredAt = now
-        center.removeDeliveredNotifications(withIdentifiers: [Self.chainID(0)])
+        center.removeDeliveredNotifications(withIdentifiers: [Self.baseID])
 
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
 
-        let request = UNNotificationRequest(identifier: Self.chainID(0), content: content, trigger: nil)
+        let request = UNNotificationRequest(identifier: Self.baseID, content: content, trigger: nil)
         center.add(request, withCompletionHandler: nil)
+        return true
+    }
+
+    /// 挂上接力：从现在起每 `interval` 秒响一次，无限期。
+    ///
+    /// 只在**进入催命期之后**调用。窗口还没到期就挂，会在窗口内提前响。
+    func armRelay(interval: TimeInterval, title: String, body: String,
+                  completion: @escaping (Bool) -> Void) {
+        // repeats 的 trigger 有硬下限 60 秒，低于它会崩。配置下限本来就是 1 分钟，
+        // 这里再夹一次，防止将来有人把间隔改小。
+        let secs = max(60, interval)
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: secs, repeats: true)
+        let request = UNNotificationRequest(identifier: Self.relayID, content: content, trigger: trigger)
+        center.add(request) { error in
+            let ok = (error == nil)
+            DispatchQueue.main.async {
+                if ok { self.relayArmed = true }
+                completion(ok)
+            }
+        }
+    }
+
+    /// 撤掉接力。走够、充电、出了时段、关开关，都要撤 ——
+    /// 它不像精确链那样会自己耗尽，不撤就会一直响下去。
+    func disarmRelay() {
+        guard relayArmed else {
+            // 没挂也清一次，防止 UserDefaults 和系统状态不一致时残留
+            center.removePendingNotificationRequests(withIdentifiers: [Self.relayID])
+            return
+        }
+        relayArmed = false
+        center.removePendingNotificationRequests(withIdentifiers: [Self.relayID])
+        center.removeDeliveredNotifications(withIdentifiers: [Self.relayID])
     }
 
     /// 撤掉待发的整条链（走够了、充电、摘下、关掉开关时用）。
@@ -175,9 +253,12 @@ final class NotificationPlanner {
     func cancelAll() {
         var ids = chain.map { $0.id }
         ids.append(Self.baseID)
+        ids.append(Self.relayID)
+        relayArmed = false
         center.removePendingNotificationRequests(withIdentifiers: ids)
         center.removeDeliveredNotifications(withIdentifiers: ids)
         chain = []
+        chainBodies = []
     }
 
     /// 清空通知中心里已经弹过的那些，不动待发的。
@@ -186,7 +267,7 @@ final class NotificationPlanner {
     /// 用户点进来会看到「一堆消息」。以前靠"只排一条"避免这个，代价是一死就哑；
     /// 现在排整条链保证后台不断，代价用这一行清掉。
     func clearDeliveredNotificationCenter() {
-        var ids = [Self.baseID]
+        var ids = [Self.baseID, Self.relayID]
         for i in 0..<Self.maxSlots { ids.append(Self.chainID(i)) }
         center.removeDeliveredNotifications(withIdentifiers: ids)
     }

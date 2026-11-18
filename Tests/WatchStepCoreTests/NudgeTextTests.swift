@@ -71,11 +71,10 @@ final class NudgeTextTests: XCTestCase {
                                            tickMinutes: 1, approximate: true)
         let live = NudgeText.reminder(targetSteps: 200, steps: 63, sittingMinutes: 31,
                                       tickMinutes: 1)
-        // 预排版带快照步数（"约"），链每次重排都会刷新；立刻弹的那条不带"约"。
-        XCTAssertEqual(scheduled, "还差约 137 步 · 已坐 31 分钟，1 分钟后再提醒你一次。")
-        XCTAssertTrue(scheduled.contains("还差约 137 步"), "预排通知要带拍快照时的剩余步数")
+        // 预排版必须把数字说清楚 —— 这是用户唯一能判断"还差多少"的地方。
+        // 以前预排版写「最多还差 N 步」，滑动窗口一挪 N 就变成谎话，所以去掉"最多"。
+        XCTAssertEqual(scheduled, "还差 137 步 · 已坐 31 分钟，1 分钟后再提醒你一次。")
         XCTAssertEqual(live, "还差 137 步 · 已坐 31 分钟，1 分钟后再提醒你一次。")
-        XCTAssertNotEqual(scheduled, live, "排程与立刻弹的措辞要能区分")
     }
 
     // MARK: - 和判定引擎对齐（同一条链上的两个环节）

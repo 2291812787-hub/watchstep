@@ -29,10 +29,6 @@ final class WatchEngine: ObservableObject {
     /// 自检结果（验收用）
     @Published private(set) var selfCheckLog: [String] = []
 
-    /// 自检的那次运行。用来丢弃过期的异步回调，也用来驱动看门狗。
-    private var selfCheckGen: UUID?
-    private var selfCheckDone = false
-
     private var timer: Timer?
     private var busy = false
     /// 这一轮查询是什么时候发起的。用来解除卡死，见 tick()。
@@ -54,17 +50,6 @@ final class WatchEngine: ObservableObject {
             return
         }
         booted = true
-        // 装上新包第一件事：把系统里属于我们、但不是这一版排的链全清掉。
-        //
-        // 为什么必须有这一步：Q 版（2.4/14）有一个「接力通知」ws.nudge.relay，
-        // 用的是 `UNTimeIntervalNotificationTrigger(repeats: true)` —— 建进去之后
-        // **自己反复响，永远不到期**，唯一的停法是被显式撤掉。而 S 版回退到 2.0 后
-        // 代码里根本没有这个 id，撤不到它。于是换包不换系统状态，旧接力照样响：
-        // 用户以为新版乱报，其实是上一版留下的东西在按点震。
-        //
-        // 同理会残留上一版排的 c0…c61。全部按已知 id 撤一遍再重排，
-        // 不去调 removeAll（那会连会话续期提醒一起清掉）。
-        NotificationPlanner.shared.purgeLegacy()
         // 进前台就把通知中心里已经弹过的清掉：该响的时候都响过了、也震过了，
         // 堆着只会变成「一打开一堆消息」。（待发的整条链绝不动 —— 那是后台继续催的命根。）
         NotificationPlanner.shared.clearDeliveredNotificationCenter()
@@ -119,10 +104,6 @@ final class WatchEngine: ObservableObject {
         reloadConfig()
 
         let now = Date()
-
-        // 步数上报：到点之后的第一次 tick 补发，每个时点只发一次（见 StepsUploader）
-        StepsUploader.shared.tickIfNeeded(now: now)
-
         // 留痕：后台到底有没有在跑。这是唯一能证伪"死在后台"的依据，
         // 自检页会把这两个数摆出来。
         AnchorStore.shared.lastTickAt = now
@@ -138,6 +119,9 @@ final class WatchEngine: ObservableObject {
         // 常驻会话启动。这种时刻绝不能拿缓存回答 —— 刚走够 200 步点进来却读到
         // 走够前的旧账，就会先发一条"起来走动"、再发一条"已满 200 步"。
         if force { StepReader.shared.invalidateCache() }
+
+        // 步数上报：到点之后的第一次 tick 补发，每个时点只发一次（见 StepsUploader）
+        StepsUploader.shared.tickIfNeeded(now: now)
 
         // 只看最近一个窗口，不是"从上次归零到现在的累计"。
         //
@@ -216,6 +200,20 @@ final class WatchEngine: ObservableObject {
         // 「充电中，暂停」，留一个上一轮的旧值会显示成「正常」——那是骗人。
         quiet = RuleEngine.quietReason(now: now, config: cfg, surroundings: env)
 
+        // ---- 先认账：挂起期间链上过点的槽位可能已经真弹过了 ----
+        //
+        // 必须在步数 guard **之前**。以前认账放在 .nudge / .satisfied 两个分支里，
+        // 于是"CMPedometer 这轮没返回"就走不到认账，而 reconcile 照样跑：
+        // 它按旧状态重排链，那批"其实已经响过"的时刻又被排了一遍 → 几秒后连响。
+        // 读不到步数时唯一必须做的事，就是别把已经响过的再排一遍。
+        let preDelivered = NotificationPlanner.shared.consumeDelivered(now: now)
+        if let d = preDelivered,
+           AnchorStore.shared.lastNudgeAt == nil || d > AnchorStore.shared.lastNudgeAt! {
+            AnchorStore.shared.lastNudgeAt = d
+            AnchorStore.shared.nudgesToday += 1
+            nudgesToday = AnchorStore.shared.nudgesToday
+        }
+
         guard let steps = steps else {
             lastDecision = .unknown
             lastError = stepCountingAvailable ? "读不到步数（运动权限？）" : "这台设备不支持计步"
@@ -234,11 +232,11 @@ final class WatchEngine: ObservableObject {
             // 挂起期间那条预排的"起来走动"可能已经被系统弹出来了（它的步数是
             // 排程时的快照，现在可能是错的）。先认账、再从通知中心撤掉，
             // 然后只发一条正确的 —— 用户不会看到"先催命、后说走够"这种自打嘴巴。
-            let delivered = NotificationPlanner.shared.consumeDelivered(now: now)
-            if let d = delivered {
-                AnchorStore.shared.lastNudgeAt = d
-                AnchorStore.shared.nudgesToday += 1
-            }
+            // 走够了必须立刻撤接力 —— 否则那条 repeats 会在"已经走够"之后
+            // 继续每分钟弹一次，一直弹到用户点开 App 为止。
+            NotificationPlanner.shared.disarmRelay()
+
+            let delivered = preDelivered
             // 不在这里 cancelAll：撤光和重排之间若被系统冻结，系统里一条通知都不剩，
             // 而 App 已死、没人能补。replaceChain 会自己撤掉多余槽位。
 
@@ -251,13 +249,14 @@ final class WatchEngine: ObservableObject {
             // 分不清是走够了还是又催一次。
             // 条件不能只看 wasNudging：App 挂起时是那条预排通知替我们催的，
             // 此时 nudgingSince 仍是 nil，但用户确实已经被催过了 —— 漏掉他更困惑。
-            if wasNudging || delivered != nil {
-                NotificationPlanner.shared.fireNow(
-                    body: "已满 \(cfg.targetSteps) 步，重新开始计时",
-                    title: "走够了",
-                    now: now
-                )
-            }
+            // 达成**每次都告诉用户**。以前只在「正在催」或「刚被催过」时才发，
+            // 于是走够的那一刻屏幕上一片安静，只有一次很容易被忽略的轻震 ——
+            // 用户只记得「还在差 200」，得点进来才看到早就满了。这是另一半根因。
+            NotificationPlanner.shared.fireNow(
+                body: "已满 \(cfg.targetSteps) 步 · 本轮 \(Int(now.timeIntervalSince(anchor) / 60)) 分钟，重新开始计时",
+                title: "走够了",
+                now: now
+            )
             nudgesToday = AnchorStore.shared.nudgesToday
 
         case .nudge:
@@ -270,11 +269,33 @@ final class WatchEngine: ObservableObject {
             if let q = quiet, q != .lowBattery {
                 AnchorStore.shared.nudgingSince = nil
                 AnchorStore.shared.lastNudgeAt = nil
-                NotificationPlanner.shared.cancelAll()
+                // 后台不许撤链：充电状态在挂起边缘可能读到旧值，
+                // 一撤空就再没人排回来（和 clearChain 同一个理由）。
+                if isBackgroundNow() {
+                    AnchorStore.shared.noteChain("≈ 后台想撤(安静:\(q))，拒绝")
+                } else {
+                    NotificationPlanner.shared.cancelAll()
+                }
                 if now.timeIntervalSince(anchor) >= cfg.window {
                     AnchorStore.shared.anchor = now
                 }
                 nudgesToday = AnchorStore.shared.nudgesToday
+                break
+            }
+
+            // 接力挂着的时候，催命由系统那条重复通知负责。
+            // 这里若再 fireNudge，App 活着的每一分钟都会多弹一条 —— 正是
+            // 「一分钟里好几条」的另一条来路。只在没接力时做实时催命。
+            if NotificationPlanner.shared.relayArmed {
+                // 必须记 nudgingSince：走够时靠 `wasNudging` 决定要不要发
+                // 「走够了」那条提示。接力模式下 delivered 永远为 nil，
+                // 再不记这个，用户走够了屏幕上什么都没有，分不清是走够了还是又被催。
+                if AnchorStore.shared.nudgingSince == nil {
+                    AnchorStore.shared.nudgingSince = now
+                }
+                AnchorStore.shared.noteIdle(now.timeIntervalSince(anchor))
+                nudgesToday = AnchorStore.shared.nudgesToday
+                longestIdle = AnchorStore.shared.longestIdle
                 break
             }
 
@@ -285,16 +306,22 @@ final class WatchEngine: ObservableObject {
             let last = AnchorStore.shared.lastNudgeAt
             let canNudge = last == nil || now.timeIntervalSince(last!) >= cfg.tick
 
-            // 挂起期间那条预排的兜底通知可能已经自己弹出来了 —— 那一条就是这次催命。
-            // 不认账的话，现在醒来就会再补一条，用户手腕上就是两条几乎一样的通知。
-            let delivered = NotificationPlanner.shared.consumeDelivered(now: now)
-            if let d = delivered, last == nil || d > last! {
-                AnchorStore.shared.lastNudgeAt = d
-                AnchorStore.shared.nudgesToday += 1
+            // 挂起期间预排的那条可能已经自己弹出来了 —— 那一条就是这次催命。
+            // 认账在上面统一做过了；这里只要"刚刚已经响过"就别再补一条。
+            // 用 dedupeGap 而不是 tick：tick 是"该催的间隔"，dedupeGap 是
+            // "两条真提醒之间最少隔多久"，后者才是防重复的那道线。
+            let recent = AnchorStore.shared.lastNudgeAt.map {
+                now.timeIntervalSince($0) < Self.dedupeGap(cfg)
+            } ?? false
+            if recent {
+                // 这一轮就是那条已经响过的，什么都不做。
             } else if canNudge {
-                fireNudge(steps: steps, anchor: anchor, now: now, cfg: cfg)
-                AnchorStore.shared.lastNudgeAt = now
-                AnchorStore.shared.nudgesToday += 1
+                // 只有真发出去才记一笔。以前被去重闸门拦掉也照样记 lastNudgeAt
+                // 和次数，于是计数虚高、触感序列错乱，还会把下一次机会推后。
+                if fireNudge(steps: steps, anchor: anchor, now: now, cfg: cfg) {
+                    AnchorStore.shared.lastNudgeAt = now
+                    AnchorStore.shared.nudgesToday += 1
+                }
             }
             AnchorStore.shared.noteIdle(now.timeIntervalSince(anchor))
             nudgesToday = AnchorStore.shared.nudgesToday
@@ -307,7 +334,18 @@ final class WatchEngine: ObservableObject {
 
     /// 催命：震动 + 一条立即投递的通知。
     /// 只有震动的话，抬腕什么也看不到，用户根本不知道刚才震的是谁。
-    private func fireNudge(steps: Int, anchor: Date, now: Date, cfg: Config) {
+    @discardableResult
+    private func fireNudge(steps: Int, anchor: Date, now: Date, cfg: Config) -> Bool {
+        // 去重闸门放在震动之前：被抑制时连震都不震，
+        // 否则"不弹通知但一直震"同样烦人。
+        let gap = Self.dedupeGap(cfg)
+        if let last = AnchorStore.shared.lastNudgeAt,
+           now.timeIntervalSince(last) < gap {
+            AnchorStore.shared.noteChain(
+                "≈ 抑制重复催命 \(Int(now.timeIntervalSince(last)))s<" + "\(Int(gap))s")
+            return false
+        }
+
         let count = AnchorStore.shared.nudgesToday
         // 每次给一串触感，间隔 0.7 秒。连着调用会被系统合并成一下，
         // 必须错开时间，才不会被误认为错觉或系统提示。
@@ -332,6 +370,15 @@ final class WatchEngine: ObservableObject {
             ),
             now: now
         )
+        return true
+    }
+
+    /// 两条真实提醒之间至少隔多久。
+    /// 取间隔的一半（1 分钟 → 30 秒，5 分钟 → 60 秒），下限 20 秒。
+    /// 上限压到 60 秒：5 分钟间隔时如果闸门放到 2.5 分钟，
+    /// App 活着时的实时催命会被压成一条，反而变少。
+    static func dedupeGap(_ cfg: Config) -> TimeInterval {
+        return max(20, min(cfg.tick / 2, 60))
     }
 
     // MARK: - 通知对账（关键）
@@ -344,6 +391,11 @@ final class WatchEngine: ObservableObject {
     /// 就再没有任何东西能把它排回来 —— 用户看到的正是「响过一两声就彻底安静」。
     /// 宁可多响，不可哑掉。
     private func clearChain(_ why: String, now: Date) {
+        // 接力**无论前后台都要撤**。这跟精确链的规则相反，理由也相反：
+        // 精确链最多 60 条，会自己耗尽，后台误判的代价有限，所以宁可留着；
+        // 接力不会耗尽，误判一次就是整夜每分钟响 —— 那边必须宁可少响。
+        NotificationPlanner.shared.disarmRelay()
+
         if isBackgroundNow() {
             AnchorStore.shared.noteChain("≈ 后台想撤(\(why))，拒绝，链保持")
             return
@@ -386,53 +438,105 @@ final class WatchEngine: ObservableObject {
 
         let deadline = RuleEngine.deadline(anchor: anchor, config: cfg)
 
-        // ---- 排整条链 ----
+        // ---- 时刻表 = 固定网格，绝不跟着 now 漂移 ----
         //
-        // 第一条必须是**窗口到期那一刻**（deadline），不是"下一个整分钟边界"。
-        // 之前的写法是「从 deadline 开始、每次 +tick、跳过已经过去的」——
-        // 而 tick 通常比 deadline 晚几百毫秒才跑，deadline 正好被判为"已过去"丢掉，
-        // 于是第一条变成 deadline + tick：设 5 分钟，第一条却排在 6 分钟。
-        // 用户看到的就是「5 分钟到了没响，隔一会儿才来一条」，自检里待发条数
-        // 也总是比应有值少一截。
+        // 以前是 `first = max(lastNudge + tick, now + 5)`。只要 lastNudgeAt 是 nil
+        // （充过电、刚启动、正好赶上"安静"分支清过它），first 就每次重建都变成
+        // 「现在 + 5 秒」—— 每 tick 一次就往后挪 5 秒，于是链的起点永远对不上，
+        // 每次都判定"不一样"、整链重建，而每重建一次 slot0 就是个新的 5 秒后
+        // → 十几秒后又弹一条。这是"一分钟里隔几秒连发好几条"的全部机制：
+        // **漂移 → 重建 → 新排期 → 又漂移**，自己喂自己。
         //
-        // 已经过了窗口（催命期）时，下一条按「上次催命 + 一个间隔」算，
-        // 也就是正文里承诺的那一刻；实在错过了就 5 秒后补。
-        let first: Date
-        if now <= deadline {
-            first = deadline
-        } else {
-            // 钉在 deadline 上的固定网格：deadline + n×间隔，只由 deadline 决定，
-            // 与"现在几点"无关。
-            //
-            // 以前是 max(base + 间隔, now + 间隔)，那个 now 让整条链跟着当前时刻一起
-            // 往前滑：每 tick 网格都变一点 → 链永远「不是同一条」→ 每分钟整条 60 条被
-            // 拆掉重建（待发数永远补回 60）、而「1 分钟后提醒你」这个承诺每次都被推到
-            // 新的「1 分钟后」，永远不会真正到点。开头「几秒一条」就是重建和刚投递的
-            // 那条撞在一起。
-            //
-            // 固定网格之后：到点就是到点，且相邻两次 tick 算出的时刻完全相同 →
-            // same 判定能生效 → 不乱重建。
-            let tick = max(1, cfg.tick)
-            let n = floor(now.timeIntervalSince(deadline) / tick) + 1
-            first = deadline.addingTimeInterval(max(1, n) * tick)
+        // 现在改成挂在锚点上的固定网格：deadline + k × tick。网格点不随 now 变，
+        // 于是同一个 tick 反复跑，算出来的 want 完全一样，replaceChain 直接跳过。
+        // 只有当某个网格点真的过去（跨过一条提醒）时，链才降一位、重排一次 ——
+        // 即每分钟最多一次，而不是每十几秒一次。
+        let step = max(cfg.tick, 5)
+
+        // ---- 接力：突破 60 条上限 ----
+        //
+        // 60 条 × 间隔 = 最多撑多久。1 分钟间隔只有 60 分钟，5 分钟有 5 小时。
+        // 一过这个点，系统里一条待发都没有了，只能等 App 被系统唤醒才补 ——
+        // 而 watchOS 的后台刷新约 4 次/小时且**不保证执行**，这就是「超过一小时
+        // 要手动点一下」的全部原因：不是 App 被杀，是链用完了。
+        //
+        // 所以只要进了催命期、App 醒着，就换成一条 repeats 通知：只占 1 个槽位，
+        // 无限期按间隔响。从这一刻起，App 之后死不死都不再影响。
+        //
+        // 只在「一小时之后还在生效时段内」时挂 —— repeats 触发器没法按时段
+        // 自己停，跨夜挂上就是整夜响。时段末尾那一段继续用精确链兜着（它会自然停）。
+        // 接力只在「精确链自己撑不住」时才用。
+        // 62 条 × 5 分钟 = 5 小时，绰绰有余，用不着它；只有间隔调到 1–2 分钟时，
+        // 62 条只够 1 小时，才需要这条永不耗尽的兜底。
+        // 平时不用它的理由很硬：它的正文是冻结的，写进什么就一直是什么。
+        let coverage = step * Double(NotificationPlanner.maxSlots)
+        if now >= deadline {
+            if cfg.isActive(at: now.addingTimeInterval(3600)), coverage < 7200 {
+                if !NotificationPlanner.shared.relayArmed {
+                    let body = NudgeText.relayFrozen(tickMinutes: Int(step / 60))
+                    NotificationPlanner.shared.armRelay(
+                        interval: step,
+                        title: NotificationPlanner.title,
+                        body: body
+                    ) { ok in
+                        if ok {
+                            AnchorStore.shared.noteChain(
+                                "接力已挂：每 \(Int(step / 60)) 分钟一条，不再受 60 条上限约束")
+                            // 接力接手，精确链全撤 —— 两条并存就是每次响两声。
+                            // 顺序不能反：先挂上再撤，中间任何一刻系统里都有通知。
+                            NotificationPlanner.shared.replaceChain([], now: Date()) { _ in "" }
+                            self.pendingNotifications = 1
+                        } else {
+                            AnchorStore.shared.noteChain("✗ 接力排不进去，继续用精确链")
+                        }
+                    }
+                }
+                // 接力挂着（或正在挂）时不再排精确链
+                if NotificationPlanner.shared.relayArmed {
+                    pendingNotifications = 1
+                    return
+                }
+            }
+        } else if NotificationPlanner.shared.relayArmed {
+            // 回到了窗口内（刚走够、锚点被重置）：接力必须在窗口里就撤，
+            // 否则它会在窗口还没到期时按老间隔继续响。
+            NotificationPlanner.shared.disarmRelay()
         }
+        let gap = Swift.max(10, Swift.min(step / 2, 60))
+        let lastNudge = AnchorStore.shared.lastNudgeAt
 
         var fires: [Date] = []
-        var t = first
+        var t = deadline
         // 只由 maxSlots 决定链有多长，不再另设"从现在起 24 分钟内"的截断。
         // 那个截断和旧的 maxSlots = 24 配套，改大之后忘了同步，于是设 30 分钟窗口时
         // first（30 分钟后）已经落在截断之外 → fires 为空 → 兜底成「只排 1 条」，
         // 响完系统里就空了，App 不醒就再也不响。用户看到的「只响一两条就没了」就是它。
         while fires.count < NotificationPlanner.maxSlots {
             if !cfg.isActive(at: t) { break }
-            fires.append(t)
-            t = t.addingTimeInterval(cfg.tick)
+            // 宽容 1 秒：tick 比 deadline 晚几百毫秒才跑，紧贴 deadline 的那个点
+            // 会被判成"已过去"而丢掉 —— 设 5 分钟就变成 6 分钟才响（老毛病）。
+            // 留着它、交给下面的 max(1, …) 变成"1 秒后响"才是对的。
+            if t.timeIntervalSince(now) >= -2 {
+                // 刚催过就别再排紧挨着的那个点，否则等于同一分钟里两条。
+                if lastNudge == nil || Swift.abs(t.timeIntervalSince(lastNudge!)) >= gap {
+                    fires.append(t)
+                }
+            }
+            t = t.addingTimeInterval(step)
         }
-        if fires.isEmpty { fires = [first] }
+        if fires.isEmpty {
+            // 窗口到期那一刻本身就在生效时段之外（比如 23:59 到期、次日 8:00 才开门）。
+            // 这种情况一条都不该排，也别去动现有的链 —— 等进了时段自然会重排。
+            if !cfg.isActive(at: deadline) {
+                AnchorStore.shared.noteChain("窗口落在时段外，链不动")
+                return
+            }
+            fires = [Swift.max(deadline, now.addingTimeInterval(5))]
+        }
 
         // 坐着的分钟数按通知**真正弹出的时刻**现算，不按现在算 ——
         // 排程可能提前好几分钟，用 now 算会少报。
-        NotificationPlanner.shared.replaceChain(fires, now: now) { fire in
+        let changed = NotificationPlanner.shared.replaceChain(fires, now: now) { fire in
             NudgeText.reminder(
                 targetSteps: cfg.targetSteps,
                 steps: steps,
@@ -443,7 +547,12 @@ final class WatchEngine: ObservableObject {
         }
 
         pendingNotifications = NotificationPlanner.shared.chainCount
-        AnchorStore.shared.noteChain("排\(fires.count)条 \(fmt(first))→\(fmt(fires.last ?? first))")
+        // 只在链真的变了才写审计。以前每 30 秒 tick 都写一行，日志里全是
+        // "排60条"，把"链什么时候变空"这种真信息淹掉了。
+        if changed {
+            AnchorStore.shared.noteChain(
+                "排\(fires.count)条 \(fmt(fires[0]))→\(fmt(fires[fires.count - 1]))")
+        }
     }
 
     private func fmt(_ d: Date) -> String {
@@ -562,29 +671,35 @@ final class WatchEngine: ObservableObject {
     /// 逐条核对不变量，把结论打在界面上。装上去第一件事就是跑它。
     /// 自检页那个「测试通知」按钮：15 秒后该响一条，用来验投递通路。
     /// 响不出来 → 是权限/投递问题；响得出来但晚了 → 是排程时刻问题。
-    func testNotificationNow() {
-        selfCheckLog.insert("· 按了测试通知按钮", at: 0)
+    /// 自检页「请求通知授权」：再问一次系统，然后把真实状态读回界面。
+    func requestNotificationAuth() {
+        NotificationPlanner.shared.requestAgain()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            NotificationPlanner.shared.authorizationStatus { s in
+                self?.notificationAuth = s
+            }
+        }
+    }
+
+    func testNotificationNow() {        selfCheckLog.insert("· 按了测试通知按钮", at: 0)
         NotificationPlanner.shared.scheduleTest(after: 15) { [weak self] msg in
             guard let self = self else { return }
             self.selfCheckLog.insert(msg, at: 0)
         }
     }
 
-    func requestNotificationAuth() {
-        selfCheckLog.insert("· 手动请求通知授权", at: 0)
-        NotificationPlanner.shared.requestAuthorization()
-        NotificationPlanner.shared.authorizationStatus { [weak self] s in
-            guard let self = self else { return }
-            self.notificationAuth = s
-            self.selfCheckLog.insert("· 授权状态：\(s)", at: 0)
+    /// 判定结果的中文说明（自检页要按人话显示，别把 enum 名甩上去）
+    var decisionText: String {
+        switch lastDecision {
+        case .unknown: return "读不到步数"
+        case .inactive: return "不在生效时段"
+        case .satisfied: return "已走够，该归零"
+        case .waiting: return "窗口内等待"
+        case .nudge: return "已到点，该催"
         }
     }
 
     func runSelfCheck() {
-        let gen = UUID()
-        selfCheckGen = gen
-        selfCheckDone = false
-
         var log: [String] = []
         let now = Date()
         let anchor = AnchorStore.shared.anchor
@@ -611,38 +726,24 @@ final class WatchEngine: ObservableObject {
         }
 
         // 2. 待发通知：现在是一整条链（后台死了也能按点响），上限 maxSlots
-        //
-        // ★ 先把上面这些同步算出来的立刻摆上屏幕。
-        //   以前整页只在两个系统回调都回来之后才赋值 —— 任何一个卡住，页面就是空白，
-        //   看起来像 app 坏了，其实只是最后一行没走到。自检页空白最坑的地方在于：
-        //   它本来就是唯一的诊断手段，一空白就什么都不知道了。
-        self.selfCheckLog = log
-
-        // 看门狗：系统通知接口不回来也得有话说，别让人对着空白猜。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-            guard let self = self, self.selfCheckGen == gen, !self.selfCheckDone else { return }
-            self.selfCheckLog.append("⚠ 系统通知接口 4 秒没回，后面几项读不到")
-        }
-
         NotificationPlanner.shared.pendingCount { [weak self] n in
-            guard let self = self, self.selfCheckGen == gen else { return }
-            var lines = self.selfCheckLog
-            if n <= NotificationPlanner.maxSlots {
-                lines.append("✓ 待发通知 \(n) 条")
+            guard let self = self else { return }
+            var lines = log
+            if NotificationPlanner.shared.relayArmed {
+                // 接力模式下"只有 1 条"是**正常且正确**的：那一条 repeats 会
+                // 无限期按间隔响，不受 60 条上限约束。不写清楚会被当成坏了。
+                lines.append("✓ 接力中：重复通知每 \(self.config.tickMinutes) 分钟一条（永不到期）")
+            } else if n <= NotificationPlanner.maxSlots {
+                lines.append("✓ 待发通知 \(n) 条（最多撑 \(n * self.config.tickMinutes) 分钟）")
             } else {
                 lines.append("✗ 待发通知 \(n) 条（超过上限，对账失效）")
             }
-            lines.append(StepsUploader.shared.statusLine())
-            for row in AnchorStore.shared.chainLog.suffix(4) {
+            for row in AnchorStore.shared.chainLog.split(separator: "\n").suffix(4) {
                 lines.append("· \(row)")
             }
 
-            // 这一段也先摆上去：授权那一步是最容易卡住的。
-            self.selfCheckLog = lines
-
             // 3. 通知授权
             NotificationPlanner.shared.authorizationStatus { s in
-                guard self.selfCheckGen == gen else { return }
                 lines.append(s == "已允许" ? "✓ 通知权限已允许" : "✗ 通知权限：\(s)（会没声音）")
                 let style = NotificationPlanner.shared.lastStyleReport
                 if style.isEmpty {
@@ -651,8 +752,9 @@ final class WatchEngine: ObservableObject {
                     lines.append(style)
                 }
 
-                // 4. 计步
+                // 4. 计步 —— 本轮到底读到多少步，这是「永远差 200」唯一的硬证据
                 lines.append(self.stepCountingAvailable ? "✓ 计步可用" : "✗ 设备不支持计步")
+                lines.append("· 本轮 \(self.stepsInWindow) / \(self.config.targetSteps) 步 · 判定：\(self.decisionText)")
 
                 // 5. 环境（电量/充电/摘下）与暂停原因
                 let env = self.surroundings
@@ -708,8 +810,9 @@ final class WatchEngine: ObservableObject {
                     lines.append("· 排定：" + shown)
                 }
 
+                lines.append(StepsUploader.shared.statusLine())
+
                 self.selfCheckLog = lines
-                self.selfCheckDone = true
             }
         }
     }
