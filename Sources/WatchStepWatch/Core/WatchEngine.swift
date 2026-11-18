@@ -29,6 +29,10 @@ final class WatchEngine: ObservableObject {
     /// 自检结果（验收用）
     @Published private(set) var selfCheckLog: [String] = []
 
+    /// 自检的那次运行。用来丢弃过期的异步回调，也用来驱动看门狗。
+    private var selfCheckGen: UUID?
+    private var selfCheckDone = false
+
     private var timer: Timer?
     private var busy = false
     /// 这一轮查询是什么时候发起的。用来解除卡死，见 tick()。
@@ -544,6 +548,10 @@ final class WatchEngine: ObservableObject {
     }
 
     func runSelfCheck() {
+        let gen = UUID()
+        selfCheckGen = gen
+        selfCheckDone = false
+
         var log: [String] = []
         let now = Date()
         let anchor = AnchorStore.shared.anchor
@@ -570,21 +578,38 @@ final class WatchEngine: ObservableObject {
         }
 
         // 2. 待发通知：现在是一整条链（后台死了也能按点响），上限 maxSlots
+        //
+        // ★ 先把上面这些同步算出来的立刻摆上屏幕。
+        //   以前整页只在两个系统回调都回来之后才赋值 —— 任何一个卡住，页面就是空白，
+        //   看起来像 app 坏了，其实只是最后一行没走到。自检页空白最坑的地方在于：
+        //   它本来就是唯一的诊断手段，一空白就什么都不知道了。
+        self.selfCheckLog = log
+
+        // 看门狗：系统通知接口不回来也得有话说，别让人对着空白猜。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self = self, self.selfCheckGen == gen, !self.selfCheckDone else { return }
+            self.selfCheckLog.append("⚠ 系统通知接口 4 秒没回，后面几项读不到")
+        }
+
         NotificationPlanner.shared.pendingCount { [weak self] n in
-            guard let self = self else { return }
-            var lines = log
+            guard let self = self, self.selfCheckGen == gen else { return }
+            var lines = self.selfCheckLog
             if n <= NotificationPlanner.maxSlots {
                 lines.append("✓ 待发通知 \(n) 条")
             } else {
                 lines.append("✗ 待发通知 \(n) 条（超过上限，对账失效）")
             }
             lines.append(StepsUploader.shared.statusLine())
-            for row in AnchorStore.shared.chainLog.split(separator: "\n").suffix(4) {
+            for row in AnchorStore.shared.chainLog.suffix(4) {
                 lines.append("· \(row)")
             }
 
+            // 这一段也先摆上去：授权那一步是最容易卡住的。
+            self.selfCheckLog = lines
+
             // 3. 通知授权
             NotificationPlanner.shared.authorizationStatus { s in
+                guard self.selfCheckGen == gen else { return }
                 lines.append(s == "已允许" ? "✓ 通知权限已允许" : "✗ 通知权限：\(s)（会没声音）")
                 let style = NotificationPlanner.shared.lastStyleReport
                 if style.isEmpty {
@@ -651,6 +676,7 @@ final class WatchEngine: ObservableObject {
                 }
 
                 self.selfCheckLog = lines
+                self.selfCheckDone = true
             }
         }
     }
