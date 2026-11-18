@@ -49,6 +49,14 @@ final class NotificationPlanner {
     /// 最近一次真正送出去的时刻（链上某条，或 app 活着时立刻弹的那条）。
     private(set) var lastDeliveredAt: Date?
 
+    /// 当前链上每一条的正文，与 chain 一一对应。
+    /// 用来判断「时刻没变、但数字变了」—— 只比触发时刻的话，人一边走一边看，
+    /// 正文会永远停在第一次排程的快照上。
+    private var chainBodies: [String] = []
+
+    /// 上次真正重挂整条链的时刻，用来节流。
+    private var lastChainRebuild: Date = .distantPast
+
     var nextFireAt: Date? { chain.first?.fireAt }
     var chainCount: Int { chain.count }
 
@@ -64,10 +72,22 @@ final class NotificationPlanner {
     /// 否则随后醒来的 tick 会因为"还没催过"再补一条，用户就同时收到两条。
     @discardableResult
     func consumeDelivered(now: Date = Date()) -> Date? {
-        guard let first = chain.first, first.fireAt <= now else { return nil }
-        chain.removeFirst()
-        lastDeliveredAt = first.fireAt
-        return first.fireAt
+        // 把这次醒来之前已经到点的**全部**认掉，返回**最后一次**的真实投递时刻。
+        //
+        // 以前只认一条、并且返回最早那条。后果是：App 睡过去 10 分钟、链上按点
+        // 响了 10 次，醒来只认出最早那一次，那个时刻 <= lastNudgeAt，
+        // 于是 `d > last` 不成立 —— 流程落进 else 分支的 canNudge，
+        // **明明刚刚响过，又立刻补发一条**。而步数一动 App 就被唤醒一次，
+        // 所以每一步变动都换来一条重复通知。用户看到的就是「不管前面发没发过，
+        // 它都再发一条」。全认完并取最新，lastNudgeAt 才等于真·最近一次，
+        // canNudge 自然为假。
+        var latest: Date? = nil
+        while let first = chain.first, first.fireAt <= now {
+            chain.removeFirst()
+            latest = first.fireAt
+        }
+        if let l = latest { lastDeliveredAt = l }
+        return latest
     }
 
     /// 让系统里排着的那条链，正好等于 `fires`（未来时刻，升序）。
@@ -81,13 +101,22 @@ final class NotificationPlanner {
         // 只要还在未来就得排。以前这里是 `> 1`，把「刚过去半秒」的 deadline
         // 一起丢掉 —— 那正是 5 分钟那条从没排进去的原因。
         let want = fires.filter { $0.timeIntervalSince(now) > 0.5 }.sorted()
+        let bodies = want.map { body($0) }
 
         if want.count == chain.count {
             var same = true
             for (i, w) in want.enumerated() {
                 if abs(w.timeIntervalSince(chain[i].fireAt)) > 2 { same = false; break }
             }
-            if same { return }
+            if same {
+                // 时刻没变，但**正文可能变了**（你正在走，步数在涨）。
+                // 正文是排进系统那一刻就冻死的，不重排就永远停在第一次的快照上：
+                // 用户走了 8 步，抬腕看到的还是半小时前的「还差 52 步」，要等
+                // 走够重置网格才会变准。这里补上正文比对，数字才会跟着人走。
+                if bodies == chainBodies { return }
+                // 别每个 tick 都重挂 60 条（30 秒一次太频繁，也容易招系统限流）。
+                if now.timeIntervalSince(lastChainRebuild) < 55 { return }
+            }
         }
 
         // **先加后删**。同 id 的 add 是原子替换，所以任何一刻系统里都有通知排着。
@@ -123,6 +152,8 @@ final class NotificationPlanner {
         }
 
         chain = fresh
+        chainBodies = bodies
+        lastChainRebuild = now
     }
 
     /// 把上一版留下的通知全撤掉（只撤我们自己的 id 前缀，不碰别的）。
@@ -137,6 +168,7 @@ final class NotificationPlanner {
         center.removePendingNotificationRequests(withIdentifiers: ids)
         center.removeDeliveredNotifications(withIdentifiers: ids)
         chain = []
+        chainBodies = []
     }
 
     /// 立刻弹一条。只在 app 活着、且这一刻的数字是真的的时候用 ——
@@ -166,6 +198,7 @@ final class NotificationPlanner {
         center.removePendingNotificationRequests(withIdentifiers: ids)
         center.removeDeliveredNotifications(withIdentifiers: ids)
         chain = []
+        chainBodies = []
     }
 
     /// 清空通知中心里已经弹过的那些，不动待发的。
