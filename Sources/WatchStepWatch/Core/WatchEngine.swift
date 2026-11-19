@@ -31,6 +31,13 @@ final class WatchEngine: ObservableObject {
 
     private var timer: Timer?
     private var busy = false
+
+    /// 后台两次判定之间的最小间隔（秒）。**只跟「多久看一次步数」有关，
+    /// 与「催命间隔」config.tickMinutes 无关** —— 两者一度被混用，
+    /// 导致把催命间隔调大后，走够 200 步要等同样久才播报。
+    /// 30 秒是 3.5 的原始行为（前台），后台放慢到 60 秒：功耗减半，
+    /// 最坏延迟 1 分钟，而不是 5 分钟、更不是 30 分钟。
+    static let backgroundTickFloor: TimeInterval = 60
     /// 这一轮查询是什么时候发起的。用来解除卡死，见 tick()。
     private var busySince: Date?
     private var pendingForce = false
@@ -88,6 +95,15 @@ final class WatchEngine: ObservableObject {
     // MARK: - 主循环
 
     func tick(force: Bool) {
+        // ---- 步数上报：先于一切判断 ----
+        //
+        // 上报是**数据**，不是提醒。它只跟时钟有关：到了整点该报就报。
+        // 以前这行排在「后台节流」和「时段外早退」后面，后果是：
+        // 夜里 23:30 那个点正好落在时段外、或恰被限流跳过，那一条就永远不报 ——
+        // 服务器上看起来像「App 死了」，其实是自己把数据口关上了。
+        // tickIfNeeded 自带「每个时点只发一次」的判据，多调几次是免费的。
+        StepsUploader.shared.tickIfNeeded(now: Date())
+
         // ---- 后台节流 ----
         //
         // 扩展会话让 App 在屏幕熄灭后仍然活着，于是那个 30 秒的 Timer 也一直在跑：
@@ -95,12 +111,17 @@ final class WatchEngine: ObservableObject {
         // 这是待机耗电的主要来源 —— 1–2%/小时，睡一觉就是十几个点，而夜里
         // 用户根本不在走路，这些查询的答案永远是 0。
         //
-        // 后台状态下按 cfg.tick（默认 5 分钟）限流，功耗降一个数量级；
-        // 前台和 force（会话启动、回到前台、后台任务唤醒）不受影响，
-        // 「走够了立刻停催」的及时性只在后台被放宽到 5 分钟，那是可接受的代价。
+        // 后台状态下按固定 60 秒限流，功耗砍一半；
+        // 前台和 force（会话启动、回到前台、后台任务唤醒）不受影响。
+        //
+        // **绝不能拿 config.tick 当这个阈值**（原来就是，是我的错）：
+        // config.tick 是「催命间隔」，默认 5 分钟、设置里能调到 30 分钟。
+        // 用它当节流阀，等于「你把催命间隔设成 30 分钟，走够 200 步后
+        // 要等 30 分钟才告诉你」—— 两件毫不相干的事被绑成了一根绳。
+        // 走够与否是事实，跟多久催一次毫无关系。
         if !force, isBackgroundNow(),
            let last = AnchorStore.shared.lastTickAt,
-           Date().timeIntervalSince(last) < config.tick {
+           Date().timeIntervalSince(last) < Self.backgroundTickFloor {
             return
         }
 
@@ -157,8 +178,7 @@ final class WatchEngine: ObservableObject {
         // 走够前的旧账，就会先发一条"起来走动"、再发一条"已满 200 步"。
         if force { StepReader.shared.invalidateCache() }
 
-        // 步数上报：到点之后的第一次 tick 补发，每个时点只发一次（见 StepsUploader）
-        StepsUploader.shared.tickIfNeeded(now: now)
+        // 步数上报已在 tick 开头处理（那儿不受限流/时段影响）。
 
         // 只看最近一个窗口，不是"从上次归零到现在的累计"。
         //
