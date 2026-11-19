@@ -118,7 +118,14 @@ struct ComplicationView: View {
 
     var body: some View {
         content
-            .containerBackground(for: .widget) { Color.clear }
+            // 必须显式声明 fullColor。watchOS 11 起复杂功能默认走「accented」渲染，
+            // 会把这一格压成单色；而表盘上只要有一个组件不声明全色，系统会把
+            // **整块表盘**一起压成单色 —— 用户看到的正是「别的颜色全没了，
+            // 只有系统圆环还有色」。系统圆环是系统自己画的，不吃这个开关。
+            .complicationFullColor()
+            // accessory 系列要用 AccessoryWidgetBackground()，不能塞 Color.clear。
+            // 透明背景在表盘上会被当成「没有背景材质」，跟着一起被去色处理。
+            .containerBackground(for: .widget) { AccessoryWidgetBackground() }
     }
 
     @ViewBuilder
@@ -171,6 +178,24 @@ struct ComplicationView: View {
         }
         .gaugeStyle(.accessoryCircularCapacity)
         .tint(tint)
+    }
+}
+
+// MARK: - 全色渲染
+
+private extension View {
+    /// 让表盘保住颜色。
+    ///
+    /// `.widgetAccentedRenderingMode(.fullColor)` 是 watchOS 11 才有的 API，
+    /// 而我们最低支持 10.0，所以包一层 availability 判断而不是抬部署目标
+    /// —— 抬了没事，但没必要为了一个修饰符抬高整个 App 的门槛。
+    @ViewBuilder
+    func complicationFullColor() -> some View {
+        if #available(watchOS 11.0, *) {
+            self.widgetAccentedRenderingMode(.fullColor)
+        } else {
+            self
+        }
     }
 }
 
