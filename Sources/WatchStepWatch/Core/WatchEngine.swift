@@ -50,6 +50,13 @@ final class WatchEngine: ObservableObject {
             return
         }
         booted = true
+        // 给延长会话装一盏独立的哨兵灯：它只认时钟，不认 tick 链路。
+        // 见 ExtendedSessionManager.shouldRun 的注释 —— 这是「整夜耗电」的根。
+        ExtendedSessionManager.shared.shouldRun = { [weak self] in
+            guard let self = self else { return false }
+            let cfg = self.config
+            return cfg.enabled && cfg.isActive(at: Date())
+        }
         // 进前台就把通知中心里已经弹过的清掉：该响的时候都响过了、也震过了，
         // 堆着只会变成「一打开一堆消息」。（待发的整条链绝不动 —— 那是后台继续催的命根。）
         NotificationPlanner.shared.clearDeliveredNotificationCenter()
@@ -81,6 +88,36 @@ final class WatchEngine: ObservableObject {
     // MARK: - 主循环
 
     func tick(force: Bool) {
+        // ---- 后台节流 ----
+        //
+        // 扩展会话让 App 在屏幕熄灭后仍然活着，于是那个 30 秒的 Timer 也一直在跑：
+        // 每 30 秒查一次 CMPedometer（唤醒计步协处理器）+ 重排一遍通知链。
+        // 这是待机耗电的主要来源 —— 1–2%/小时，睡一觉就是十几个点，而夜里
+        // 用户根本不在走路，这些查询的答案永远是 0。
+        //
+        // 后台状态下按 cfg.tick（默认 5 分钟）限流，功耗降一个数量级；
+        // 前台和 force（会话启动、回到前台、后台任务唤醒）不受影响，
+        // 「走够了立刻停催」的及时性只在后台被放宽到 5 分钟，那是可接受的代价。
+        if !force, isBackgroundNow(),
+           let last = AnchorStore.shared.lastTickAt,
+           Date().timeIntervalSince(last) < config.tick {
+            return
+        }
+
+        // ---- 时段外：一步都不做 ----
+        //
+        // 0 点到 8 点本来就不该有任何判定：走没走够、差多少步，夜里都没有意义。
+        // 而每查一次 CMPedometer 都要唤醒计步协处理器，这是实打实的电。
+        // 这里只顺手把延长会话收回去，然后就返回。
+        // force（用户点进来 / 会话启动 / 后台任务）除外 —— 那时要显示真实状态。
+        if !force {
+            let cfgNow = config
+            if !cfgNow.enabled || !cfgNow.isActive(at: Date()) {
+                ExtendedSessionManager.shared.setDesired(false)
+                return
+            }
+        }
+
         if busy {
             // 卡死保护：CMPedometer 的回调有可能永远不来 —— 在「App 正要被系统
             // 冻结」的那一瞬间发起查询就是这样：进程冻住，回调排不上，解冻后

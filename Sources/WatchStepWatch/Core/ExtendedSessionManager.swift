@@ -21,6 +21,26 @@ final class ExtendedSessionManager: NSObject, ObservableObject {
     private var session: WKExtendedRuntimeSession?
     private var wantRunning = false
     private var restartWorkItem: DispatchWorkItem?
+
+    /// 独立的时段闸门，由引擎注入。
+    ///
+    /// 为什么需要它：原来「关会话」只有一条链——
+    /// `tick → CMPedometer 回调 → reconcileNotifications → setDesired(false)`。
+    /// 但**续期不走这条链**：`WillExpire → scheduleRestart → guard wantRunning`。
+    /// 只要那条链有一次没走通（查询回调没回来、busy 卡住、进程被冻结），
+    /// `wantRunning` 就一直是 true，会话一小时接一小时地续，整夜都在跑。
+    /// 1–2%/小时的代价，睡一觉就是十几个点。
+    ///
+    /// 这道闸门直接读 Config 的生效时段，不经过任何 tick 链路，
+    /// 所以任何时候续期都会先被它挡住。
+    var shouldRun: (() -> Bool)?
+
+    /// 此刻到底该不该占着延长运行时。两道条件缺一不可。
+    private func allowedNow() -> Bool {
+        guard wantRunning else { return false }
+        if let gate = shouldRun, !gate() { return false }
+        return true
+    }
     /// 连续失败次数（成功启动即清零）。以前用 `segmentsStarted` 判断退避，
     /// 那是一辈子只增不减的累计值 —— 跑满 7 段之后，每次失败都固定等 2 分钟，
     /// 后台一断就再也接不上。
@@ -34,7 +54,8 @@ final class ExtendedSessionManager: NSObject, ObservableObject {
     }
 
     func startIfNeeded() {
-        guard wantRunning, !isRunning, session == nil else { return }
+        // 闸门先过一遍：wantRunning 可能是几小时前设的，此刻早已出了生效时段。
+        guard allowedNow(), !isRunning, session == nil else { return }
         let s = WKExtendedRuntimeSession()
         s.delegate = self
         session = s
@@ -68,7 +89,16 @@ final class ExtendedSessionManager: NSObject, ObservableObject {
     private func scheduleRestart(after seconds: TimeInterval) {
         restartWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
-            guard let self = self, self.wantRunning else { return }
+            guard let self = self else { return }
+            // 闸门在这里再挡一次：这是「整夜耗电」的最后一个缺口。
+            // 到期回调 → 5 秒后重启 → 如果此刻已经出了生效时段，必须就此收手，
+            // 否则每小时续一段，睡一觉 8 小时全在跑。
+            guard self.allowedNow() else {
+                self.session = nil
+                self.isRunning = false
+                self.lastEndReason = "时段外，不续"
+                return
+            }
             self.session = nil
             self.startIfNeeded()
         }
