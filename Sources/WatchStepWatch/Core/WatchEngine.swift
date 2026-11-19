@@ -326,7 +326,14 @@ final class WatchEngine: ObservableObject {
             return
         }
 
-        guard now.timeIntervalSince(lastWidgetReload) >= 300 else { return }
+        // 纯步数变化：3 分钟一次。
+        //
+        // 60 秒那一版是每小时 60 次，加上表盘自己的兜底约 40 次，
+        // 一小时一百多次 —— 远超系统给一块复杂功能的额度，结果就是
+        // 归零那次被挤掉。300 秒（12 次/小时）又太保守：走路时表盘
+        // 上的步数会落后 5 分钟，「还差 20 步」和「还差 300 步」差别太明显。
+        // 180 秒是折中：请求量降到原来的四分之一，步数最多落后 3 分钟。
+        guard now.timeIntervalSince(lastWidgetReload) >= 180 else { return }
         lastWidgetReload = now
         lastWidgetReloadAt = now
         widgetReloadCount += 1
