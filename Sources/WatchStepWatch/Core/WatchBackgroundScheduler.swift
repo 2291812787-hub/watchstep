@@ -36,7 +36,12 @@ final class WatchBackgroundScheduler {
         UserDefaults.standard.set(now, forKey: "bg.lastScheduledAt")
         scheduleRequested = true
 
-[CONTEXT OFFLOADED] Historical argument 'new_string' is stored in /var/minis/offloads/tools/nm-context-arguments-e89d18a1cf1019b4fd8ffdd530eecb53c4dcac1a929b0bcfb5009c50c3d268ed.json. This is a reference, not the original argument. Read the JSON before reusing its value.
+        // 时段外（含手动暂停）一律不排后台唤醒。
+        // 排了也只是把 App 从深睡里拽起来一次，然后 tick 立刻早退 —— 纯耗电。
+        // 不排的代价只是「明早第一次唤醒晚一点」，打开 App 会重新排上。
+        guard WatchEngine.shared.config.isActive(at: now) else { return }
+
+        let fireAt = now.addingTimeInterval(max(60, interval))
         WKApplication.shared().scheduleBackgroundRefresh(
             withPreferredDate: fireAt,
             userInfo: nil
@@ -55,7 +60,8 @@ final class WatchBackgroundScheduler {
     /// 后台任务被系统唤起时调用（在 WatchStepApp 的 handle() 里）。
     /// 只做一件事：把控制权交回引擎，引擎自己会重新对账并重排通知。
     func handle(task: WKApplicationRefreshBackgroundTask) {
-        WatchEngine.shared.tick(force: true)
+        // 不传 force：时段外或暂停中，tick 会自己早退，一次查询都不做。
+        WatchEngine.shared.tick(force: false)
         // 顺手排下一次
         reschedule(after: 5 * 60)
         task.setTaskCompletedWithSnapshot(false)
