@@ -75,14 +75,25 @@ struct Provider: TimelineProvider {
         // CMPedometer 的回调不一定按时来（权限被拒、系统忙都可能）。
         // 不设看门狗的话 completion 永远不调用 = 这一格永远没有新数据，
         // 系统会一直显示上一次的旧画面。所以到点必给一个结果。
+        // 主 App 每轮 tick 都会把真实的 roundSteps 写进共享快照，它一定
+        // 有 Motion 权限（App 本体声明过）。表盘自己调 CMPedometer 只是
+        // 「让数字更新鲜一点」的加分项 —— 扩展里这次查询可能直接失败，
+        // 一辈子不回调。所以先用快照里的值当底，查询成功了再往上顶。
+        let baseSteps = snap?.roundSteps
+
         var answered = false
         func finishOnce(_ steps: Int?) {
             guard !answered else { return }
             answered = true
-            finish(steps)
+            // 两个来源取大的那个：快照是主 App 算的，pedometer 是刚查的，
+            // 正常情况下后者 ≥ 前者；万一 pedometer 给出更小值（权限/口径
+            // 问题），用快照的，别让进度往回退。
+            if let a = steps, let b = baseSteps { finish(max(a, b)); return }
+            finish(steps ?? baseSteps)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            finishOnce(snap?.roundSteps)
+        // 兜底提前到 2 秒：用户抬手腕就等这一下，3 秒已经能感觉到空白。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            finishOnce(nil)
         }
 
         guard let snap, snap.enabled, let anchor = snap.anchor, anchor < now else {
@@ -90,7 +101,7 @@ struct Provider: TimelineProvider {
             return
         }
         guard CMPedometer.isStepCountingAvailable() else {
-            finishOnce(snap.roundSteps)
+            finishOnce(nil)
             return
         }
         // 必须持住这个对象。写成 `CMPedometer().queryPedometerData(...)` 的话，
