@@ -219,6 +219,13 @@ final class WatchEngine: ObservableObject {
             let liveAnchor = AnchorStore.shared.anchor
             let liveSteps = liveAnchor > anchor ? 0 : steps
             self.reconcileNotifications(steps: liveSteps, anchor: liveAnchor, now: Date(), cfg: cfg)
+            // 表盘要在锚点重置的同一瞬间看到新值，所以用 reset 后的 liveAnchor。
+            SharedSnapshot.publish(anchor: liveAnchor,
+                                   target: cfg.targetSteps,
+                                   window: cfg.windowMinutes,
+                                   roundSteps: liveSteps ?? 0,
+                                   enabled: cfg.enabled,
+                                   pausedUntil: cfg.pausedUntil)
             self.busy = false
             self.busySince = nil
             if self.pendingForce {
@@ -729,6 +736,16 @@ final class WatchEngine: ObservableObject {
             NotificationPlanner.shared.cancelAll()
             AnchorStore.shared.reset(to: Date())
         }
+
+        // 配置一改就立刻推快照，不等下一轮 tick。
+        // 用户在设置里把 200 改成 300，抬腕看表盘应该马上是 300 ——
+        // 等 tick 的话可能是几分钟后，App 甚至已经睡了，那就永远不更新。
+        SharedSnapshot.publish(anchor: AnchorStore.shared.anchor,
+                               target: c.targetSteps,
+                               window: c.windowMinutes,
+                               roundSteps: stepsInWindow,
+                               enabled: c.enabled,
+                               pausedUntil: c.pausedUntil)
 
         StepReader.shared.invalidateCache()
         tick(force: true)

@@ -7,14 +7,19 @@ options:
   bundleIdPrefix: top.webchangming
   deploymentTarget:
     iOS: "16.0"
-    watchOS: "8.0"
+    # 8.0 → 10.0：复杂功能用的 WidgetKit 扩展要求不低于宿主 App。
+    # 宿主 8.0 / 扩展 10.0 这种组合 Xcode 会直接报错
+    # （"The app extension has a deployment target greater than the
+    # containing app's"），而且 accessory 那几款表盘槽位本来也要 watchOS 9+。
+    # 这台表是 watchOS 27，抬到 10.0 没有任何代价。
+    watchOS: "10.0"
   createIntermediateGroups: true
   groupSortPosition: top
 
 settings:
   base:
-    MARKETING_VERSION: "3.9"
-    CURRENT_PROJECT_VERSION: "29"
+    MARKETING_VERSION: "4.0"
+    CURRENT_PROJECT_VERSION: "30"
     SWIFT_VERSION: "5.0"
     # 自签路线：手动签名，不自动要描述文件
     CODE_SIGN_STYLE: Manual
@@ -51,6 +56,10 @@ targets:
         excludes:
           - "Info.plist"
       - path: Sources/WatchStepCore
+      - path: Sources/WatchStepShared
+    dependencies:
+      - target: WatchStepWidget
+        embed: true
     info:
       path: Sources/WatchStepWatch/Info.plist
       properties:
@@ -88,3 +97,38 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         CODE_SIGNING_ALLOWED: NO
         SWIFT_OBJC_BRIDGING_HEADER: ""
+
+  # ---------- 表盘复杂功能（WidgetKit 扩展） ----------
+  #
+  # 为什么必须新建一个 .appex：这是 SwiftUI 单 target 的 watchOS App
+  # （WKApplication=true，没有 WatchKit Extension），而复杂功能的数据源
+  # 必须有个容器来承载。ClockKit 那条老路需要 Extension 才能挂 datasource，
+  # 我们这里无处可挂，所以只能走 WidgetKit 扩展。
+  #
+  # 代价是 IPA 里多一层嵌套 bundle，iloader 要单独为它签名 —— 这是本步唯一的风险点。
+  WatchStepWidget:
+    type: app-extension
+    platform: watchOS
+    deploymentTarget:
+      watchOS: "10.0"
+    sources:
+      - path: Sources/WatchStepWidget
+        excludes:
+          - "Info.plist"
+      - path: Sources/WatchStepShared
+    info:
+      path: Sources/WatchStepWidget/Info.plist
+      properties:
+        CFBundleDisplayName: 步数进度
+        # 扩展的版本号必须和主 App、手表 App 完全一致，否则 installd 直接拒绝
+        # （"The CFBundleVersion of an app extension must match that of its
+        # containing parent app"）。三处都走同一组构建变量，不要手写数字。
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.webchangming.step.watchkitapp.widget
+        SKIP_INSTALL: YES
+        CODE_SIGNING_ALLOWED: NO
