@@ -130,7 +130,17 @@ final class NotificationPlanner {
         // 现在放宽到「过去 2.5 秒内还算数」：迟到的那个网格点必须补一条"马上就响"，
         // 否则设 5 分钟会变成 6 分钟才响。重复的风险由调用方兜着 ——
         // 引擎每轮先用 consumeDelivered 认账，再用 dedupeGap 把这些点剔掉。
-        let want = fires.filter { $0.timeIntervalSince(now) > -2.5 }.sorted()
+        // 只保留「还没过去」的点，外加半秒的抖动容忍。
+        //
+        // 以前这里放到 -2.5 秒，理由是「迟到的网格点也要补一条，否则设 5 分钟
+        // 会变成 6 分钟才响」。但补的代价是**重复**：那条刚过去 2 秒的通知
+        // 其实已经投递过了（consumeDelivered 认得账，可 App 被冻结时认不到），
+        // 再补一条就是用户说的「步数一变，马上又发一条」。
+        //
+        // 真正的迟到补救交回给引擎：它每轮先 consumeDelivered 认账，
+        // 认到就在 lastNudgeAt 上挡住；认不到才 fireNow 补。补一条准确的
+        // 比补一条快照好 —— 快照里的步数早就过时了。
+        let want = fires.filter { $0.timeIntervalSince(now) > -0.5 }.sorted()
         let wantBodies = want.map(body)
 
         if want.count == chain.count {
@@ -199,7 +209,19 @@ final class NotificationPlanner {
             return false
         }
         lastDeliveredAt = now
-        center.removeDeliveredNotifications(withIdentifiers: [Self.baseID])
+
+        // 撤掉「已经弹出来」的所有我方通知，不只是 baseID。
+        //
+        // 这是用户报的「走满 200 步先弹一条还差 N 步、紧接着又弹已满 200 步」
+        // 的全部根源：预排链用的是 ws.nudge.c0 / c1 / …，而这里原来只撤
+        // ws.nudge 自己。于是那条按 deadline 到点响的「还差 N 步」留在手表上，
+        // 「已满 200 步」紧跟着又弹一条，两条并排卡在通知中心。
+        //
+        // 撤的是 delivered（已经响过的），pending 那条链不动 —— 上一段注释
+        // 里说的"别把链一起撤掉"依然成立，这里只清理已经落地的那几条。
+        var stale = [Self.baseID, Self.relayID]
+        for i in 0..<Self.maxSlots { stale.append(Self.chainID(i)) }
+        center.removeDeliveredNotifications(withIdentifiers: stale)
 
         let content = UNMutableNotificationContent()
         content.title = title

@@ -46,6 +46,7 @@ struct Surroundings: Equatable {
 enum QuietReason: String, Equatable, CaseIterable {
 
     case disabled        // 总开关关了
+    case paused          // 被「暂停」按钮按住了，或还没到恢复时刻
     case outsideWindow   // 不在生效时段
     case charging        // 在充电
     case offWrist        // 摘下来了
@@ -55,6 +56,7 @@ enum QuietReason: String, Equatable, CaseIterable {
     var label: String {
         switch self {
         case .disabled:      return "已关闭"
+        case .paused:        return "已暂停"
         case .outsideWindow: return "不在生效时段"
         case .charging:      return "充电中，暂停"
         case .offWrist:      return "手表已摘下，暂停"
@@ -73,6 +75,11 @@ extension RuleEngine {
                                    config: Config,
                                    surroundings s: Surroundings) -> QuietReason? {
         guard config.enabled else { return .disabled }
+
+        // 暂停要单独判，不能只靠 isActive —— 那边的返回是「不在生效时段」，
+        // 而用户按了暂停却看到「不在生效时段」会以为设置坏了。
+        if config.isPaused(at: now) { return .paused }
+
         guard config.isActive(at: now) else { return .outsideWindow }
 
         if s.offWrist && config.pauseOffWrist { return .offWrist }
@@ -96,10 +103,10 @@ extension RuleEngine {
     static func windowStart(now: Date,
                                    config: Config,
                                    calendar: Calendar = .current) -> Date? {
-        guard config.startHour != config.endHour else { return nil }  // 全天生效，没有起点
+        guard config.startMinute != config.endMinute else { return nil }  // 全天生效，没有起点
         var comps = calendar.dateComponents([.year, .month, .day], from: now)
-        comps.hour = config.startHour
-        comps.minute = 0
+        comps.hour = config.startMinute / 60
+        comps.minute = config.startMinute % 60
         comps.second = 0
         guard var start = calendar.date(from: comps) else { return nil }
         if start > now {

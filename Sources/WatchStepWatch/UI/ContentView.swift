@@ -4,6 +4,7 @@ struct ContentView: View {
     @EnvironmentObject var engine: WatchEngine
     @State private var showSettings = false
     @State private var showSelfCheck = false
+    @State private var showPause = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -11,6 +12,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSettings) { SettingsView().environmentObject(engine) }
         .sheet(isPresented: $showSelfCheck) { SelfCheckView().environmentObject(engine) }
+        .sheet(isPresented: $showPause) { PauseView().environmentObject(engine) }
     }
 
     @ViewBuilder
@@ -29,6 +31,19 @@ struct ContentView: View {
                     engine.tick(force: true)
                 } label: {
                     Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+
+                // 暂停键。已经在暂停里，点一下就是恢复 —— 不要让人为了
+                // 取消暂停再翻一层菜单。
+                Button {
+                    if engine.isPaused {
+                        engine.resumeNow()
+                    } else {
+                        showPause = true
+                    }
+                } label: {
+                    Image(systemName: engine.isPaused ? "play.fill" : "pause.fill")
                 }
                 .buttonStyle(.bordered)
 
@@ -130,7 +145,7 @@ struct ContentView: View {
         }
         if !engine.config.enabled { return "已在设置里关闭" }
         if !engine.config.isActive(at: date) {
-            return "生效时段 \(engine.config.startHour):00–\(engine.config.endHour):00"
+            return "生效时段 \(engine.config.activeSpanText)"
         }
         if engine.level(at: date) == .overdue {
             return "每 \(engine.config.tickMinutes) 分钟催一次"

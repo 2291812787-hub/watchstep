@@ -36,7 +36,7 @@ final class WatchBackgroundScheduler {
         UserDefaults.standard.set(now, forKey: "bg.lastScheduledAt")
         scheduleRequested = true
 
-        let fireAt = now.addingTimeInterval(max(60, interval))
+[CONTEXT OFFLOADED] Historical argument 'new_string' is stored in /var/minis/offloads/tools/nm-context-arguments-e89d18a1cf1019b4fd8ffdd530eecb53c4dcac1a929b0bcfb5009c50c3d268ed.json. This is a reference, not the original argument. Read the JSON before reusing its value.
         WKApplication.shared().scheduleBackgroundRefresh(
             withPreferredDate: fireAt,
             userInfo: nil

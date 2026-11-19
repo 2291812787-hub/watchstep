@@ -289,6 +289,11 @@ final class WatchEngine: ObservableObject {
             // 达成**每次都告诉用户**。以前只在「正在催」或「刚被催过」时才发，
             // 于是走够的那一刻屏幕上一片安静，只有一次很容易被忽略的轻震 ——
             // 用户只记得「还在差 200」，得点进来才看到早就满了。这是另一半根因。
+            // 先清掉通知中心里已经弹出来的那些 —— 预排链那条「还差 N 步」
+            // 就在里面。fireNow 内部也会清，这里显式做一次是因为它可能被
+            // minGap 挡掉，挡掉之后旧条不该还挂在那儿。
+            NotificationPlanner.shared.clearDeliveredNotificationCenter()
+
             NotificationPlanner.shared.fireNow(
                 body: "已满 \(cfg.targetSteps) 步 · 本轮 \(Int(now.timeIntervalSince(anchor) / 60)) 分钟，重新开始计时",
                 title: "走够了",
@@ -568,7 +573,25 @@ final class WatchEngine: ObservableObject {
                 AnchorStore.shared.noteChain("窗口落在时段外，链不动")
                 return
             }
-            fires = [Swift.max(deadline, now.addingTimeInterval(5))]
+            // 兜底必须落在**网格点**上，绝不能用相对时间。
+            //
+            // 原来写的是 now + 5 秒。每一轮 tick 都会重新算出一个「5 秒后」，
+            // 而它一旦响过就被认账吃掉，下一轮又生出一个新的 5 秒后 ——
+            // 结果就是用户说的「步数一变动，马上又发一条」，每轮都发。
+            // 用网格点则天然幂等：同一时刻反复算，算出来的还是同一条。
+            var k = 0.0
+            while k < Double(NotificationPlanner.maxSlots) {
+                let cand = deadline.addingTimeInterval(k * step)
+                if cand.timeIntervalSince(now) > 1, cfg.isActive(at: cand) {
+                    fires = [cand]
+                    break
+                }
+                k += 1
+            }
+            if fires.isEmpty {
+                AnchorStore.shared.noteChain("兜底也落在时段外，不排")
+                return
+            }
         }
 
         // 坐着的分钟数按通知**真正弹出的时刻**现算，不按现在算 ——
@@ -626,6 +649,22 @@ final class WatchEngine: ObservableObject {
             AnchorStore.shared.reset(to: Date())
         }
 
+        // 暂停状态变化：立刻撤掉系统里已经排好的全部通知。
+        // 不撤的话，按下暂停之后第一条仍会按原时刻弹 —— 那正是用户按暂停
+        // 想避免的事，比不按更让人恼火。也顺手收回延长运行时，省电。
+        let pausedNow = c.isPaused(at: Date())
+        let pausedBefore = old.isPaused(at: Date())
+        if pausedNow && !pausedBefore {
+            NotificationPlanner.shared.cancelAll()
+            ExtendedSessionManager.shared.setDesired(false)
+            AnchorStore.shared.noteChain("已暂停，撤掉全部排期")
+        }
+        // 恢复：给一个完整的新窗口，别一恢复就判「已经坐了 2 小时」。
+        if !pausedNow && pausedBefore {
+            AnchorStore.shared.reset(to: Date())
+            AnchorStore.shared.noteChain("暂停结束，重新计时")
+        }
+
         // 窗口/间隔改过 = 重新定义「一轮」。
         //
         // 不重置锚点的话：把 30 分钟改成 2 分钟那一刻，判定看到的是「已坐 33 分钟」，
@@ -647,6 +686,38 @@ final class WatchEngine: ObservableObject {
     func set(_ keyPath: WritableKeyPath<Config, Int>, _ value: Int) {
         update { c in c[keyPath: keyPath] = value }
     }
+
+    // MARK: - 暂停
+
+    /// 从现在起暂停一段时长，到点自动恢复。
+    func pause(for seconds: TimeInterval) {
+        update { $0.pausedUntil = Date().addingTimeInterval(seconds) }
+    }
+
+    /// 暂停到「下一个 8:00」—— 晚上按一下，明早正常开始，不用惦记着恢复。
+    func pauseUntilMorning() {
+        let cal = Calendar.current
+        var comps = cal.dateComponents([.year, .month, .day], from: Date())
+        comps.hour = 8
+        comps.minute = 0
+        comps.second = 0
+        guard var target = cal.date(from: comps) else {
+            pause(for: 8 * 3600)
+            return
+        }
+        if target <= Date() {
+            target = cal.date(byAdding: .day, value: 1, to: target) ?? target
+        }
+        update { $0.pausedUntil = target }
+    }
+
+    /// 立刻恢复，不等暂停到期。
+    func resumeNow() {
+        update { $0.pausedUntil = nil }
+    }
+
+    /// 此刻是否处于暂停（含「时段外」以外的显式暂停）。
+    var isPaused: Bool { config.isPaused(at: Date()) }
 
     func setBool(_ keyPath: WritableKeyPath<Config, Bool>, _ value: Bool) {
         update { c in c[keyPath: keyPath] = value }
@@ -811,7 +882,7 @@ final class WatchEngine: ObservableObject {
                 } else {
                     lines.append("· 判定：会按点催")
                 }
-                lines.append("· 生效时段：\(self.config.startHour):00–\(self.config.endHour):00")
+                lines.append("· 生效时段：\(self.config.activeSpanText)")
 
                 // 6. 后台能不能真的跑起来 —— 这决定「走够就立刻确认」成不成立。
                 // 挂起时手表不给步数变化的回调，只能靠常驻会话自己醒着去查；

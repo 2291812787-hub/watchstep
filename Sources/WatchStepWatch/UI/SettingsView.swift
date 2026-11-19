@@ -21,11 +21,19 @@ struct SettingsView: View {
                 numberRow("催命间隔", value: engine.config.tickMinutes, unit: "分",
                           range: 1...30, step: 1) { engine.set(\.tickMinutes, $0) }
 
-                numberRow("开始时段", value: engine.config.startHour, unit: "点",
-                          range: 0...23, step: 1) { engine.set(\.startHour, $0) }
+                // 时段按「一天中的第几分钟」存，步长 30 分钟。
+                // 以前只有整点可选，可是「22:30 之后别吵我」才是真实作息。
+                timeRow("开始时段", minute: engine.config.startMinute, step: 30) {
+                    engine.set(\.startMinute, $0)
+                }
 
-                numberRow("结束时段", value: engine.config.endHour, unit: "点",
-                          range: 0...23, step: 1) { engine.set(\.endHour, $0) }
+                timeRow("结束时段", minute: engine.config.endMinute, step: 30) {
+                    engine.set(\.endMinute, $0)
+                }
+
+                Text(engine.config.activeSpanText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
 
                 Toggle("走够时确认一下", isOn: Binding(
                     get: { engine.config.confirmHapticOnReset },
@@ -77,6 +85,29 @@ struct SettingsView: View {
 
                 Button {
                     apply(min(range.upperBound, value + step))
+                } label: { Image(systemName: "plus") }
+                    .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    /// 时段行：显示成 08:00 这种，而不是「480 分钟」。
+    /// 步长 30 分钟 = 整点和半点，正好覆盖「22:30 之后别吵我」这类作息。
+    @ViewBuilder
+    private func timeRow(_ title: String, minute: Int, step: Int,
+                         apply: @escaping (Int) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(title) \(Config.clockString(minute))")
+                .font(.system(size: 12))
+            HStack(spacing: 6) {
+                Button {
+                    // 1440 分钟一圈，越过 00:00 要回绕，不能变成负数。
+                    apply(((minute - step) % 1440 + 1440) % 1440)
+                } label: { Image(systemName: "minus") }
+                    .buttonStyle(.bordered)
+
+                Button {
+                    apply((minute + step) % 1440)
                 } label: { Image(systemName: "plus") }
                     .buttonStyle(.bordered)
             }
