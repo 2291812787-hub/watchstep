@@ -271,7 +271,8 @@ final class WatchEngine: ObservableObject {
     /// 只写不喊是没用的：表盘的 timeline 由系统排期，App 不主动
     /// `reloadTimelines` 的话，新一轮要等系统下一次来问才显示（最长 5 分钟），
     /// 用户看到的就是「通知已经说新一轮了，表盘还停在上一轮」。
-    /// reload 有预算，所以节流：锚点变了必须喊，纯步数变化 90 秒一次。
+    /// reload 有预算，所以节流：锚点变了必须喊，纯步数变化 60 秒一次
+    /// （白天常驻会话期间后台 tick 就是 60 秒一轮，对齐后每轮都能刷新）。
     private func publishSnapshot(liveAnchor: Date, liveSteps: Int, cfg: Config) {
         SharedSnapshot.publish(anchor: liveAnchor,
                                target: cfg.targetSteps,
@@ -282,7 +283,7 @@ final class WatchEngine: ObservableObject {
         let now = Date()
         let anchorChanged = lastPublishedAnchor != liveAnchor
         lastPublishedAnchor = liveAnchor
-        guard anchorChanged || now.timeIntervalSince(lastWidgetReload) >= 90 else { return }
+        guard anchorChanged || now.timeIntervalSince(lastWidgetReload) >= 60 else { return }
         lastWidgetReload = now
         WidgetCenter.shared.reloadTimelines(ofKind: "WatchStepComplication")
     }
