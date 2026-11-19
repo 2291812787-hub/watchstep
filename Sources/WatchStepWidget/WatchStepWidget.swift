@@ -48,10 +48,20 @@ struct Provider: TimelineProvider {
         let now = Date()
         let snap = SharedSnapshot.load()
 
-        // 下次再问的时机：跟着 App 的 tick 节奏走。App 每轮 tick 都会主动
-        // reloadTimelines，这一条只是兜底 —— 万一 App 没在跑，也别让表盘
-        // 一直挂着老数据。15 分钟足够，且远在系统预算之内。
-        func finish(_ steps: Int?) {
+        // completion 只能调用一次。查询链可能比看门狗慢（二分要好几轮），
+        // 没有这道闸的话超时先交了一份、查询回来又交一份 ——
+        // WidgetKit 会当成两次时间线请求，白烧预算。
+        var answered = false
+
+        // 下次再问的时机：App 醒着时由它主动 reload，这一条只是兜底。
+        func finish(_ steps: Int?, anchorOverride: Date? = nil) {
+            guard !answered else { return }
+            answered = true
+            // anchorOverride：表盘自己推算出来的新一轮起点。
+            // 走满归零时 App 可能在睡觉，等它醒就晚了 15 分钟 ——
+            // 这时用表盘算出来的时刻顶替，倒计时和进度立刻就是对的。
+            var used = snap
+            if let a = anchorOverride { used?.anchor = a }
             // 除了「现在」这一条，还要在**到期那一刻**放一条。
             //
             // 为什么必须这样：倒计时用的是 Text(_, style: .timer)，那是系统
@@ -61,23 +71,25 @@ struct Provider: TimelineProvider {
             //
             // 放一条 date == deadline 的 entry，系统到点自动切过去，
             // 那条的子行是「该动了」，不依赖 App 是否还活着。
-            var entries = [Entry(date: now, snapshot: snap, roundSteps: steps)]
-            if let d = deadlineOf(snap), d > now {
-                entries.append(Entry(date: d, snapshot: snap, roundSteps: steps))
-                entries.append(Entry(date: d.addingTimeInterval(1), snapshot: snap, roundSteps: steps))
+            var entries = [Entry(date: now, snapshot: used, roundSteps: steps)]
+            if let d = deadlineOf(used), d > now {
+                entries.append(Entry(date: d, snapshot: used, roundSteps: steps))
+                entries.append(Entry(date: d.addingTimeInterval(1), snapshot: used, roundSteps: steps))
             }
             // 兜底节奏：这是「系统下次来问扩展」的时间，属于**要花预算**的动作，
             // 和 App 侧的 reloadTimelines 抢同一份配额。
             //
-            // 4.9 收到 90 秒是错的：App 每 60 秒喊一次 + 扩展每 90 秒被问一次，
-            // 两份加起来远远超过 watchOS 给一块复杂功能的每小时额度，结果就是
-            // 真正要紧的那一次（走满归零）被挤掉。
+            // watchOS 给一块表盘复杂功能的额度大约是**按天**几十次，不是按小时。
+            // 我们踩过的坑：4.8 把 App 侧节流收到 60 秒（每小时 60 次）、
+            // 4.9 又把这里收到 90 秒，一两个小时就把一整天的额度烧光。
+            // 烧完之后系统退化成固定间隔 —— 实测就是**15 分钟**才更新一次，
+            // 而且不管 App 怎么喊都不再理。
             //
-            // 现在放回 10 分钟：每小时 6 次。这一格要更新步数，主要靠 App 侧
-            // 归零时的 reload（必喊）和 5 分钟一次的步数刷新，不靠这里的兜底。
-            // 这里只负责「App 完全没在跑，也别让表盘永远挂着老数据」。
+            // 现在放到 15 分钟，对齐系统自己的退化频率：既然它反正按这个节奏
+            // 来问，我们就不必再额外消耗额度去求它。真正要紧的那一次
+            // （走满归零）由 App 的 reload 负责，而且表盘自己也会算（见下）。
             completion(Timeline(entries: entries,
-                                policy: .after(now.addingTimeInterval(600))))
+                                policy: .after(now.addingTimeInterval(900))))
         }
 
         // CMPedometer 的回调不一定按时来（权限被拒、系统忙都可能）。
@@ -89,13 +101,11 @@ struct Provider: TimelineProvider {
         // 一辈子不回调。所以先用快照里的值当底，查询成功了再往上顶。
         let baseSteps = snap?.roundSteps
 
-        var answered = false
         func finishOnce(_ steps: Int?) {
-            guard !answered else { return }
-            answered = true
             // 两个来源取大的那个：快照是主 App 算的，pedometer 是刚查的，
             // 正常情况下后者 ≥ 前者；万一 pedometer 给出更小值（权限/口径
             // 问题），用快照的，别让进度往回退。
+            // 去重交给 finish 里的 answered 闸门。
             if let a = steps, let b = baseSteps { finish(max(a, b)); return }
             finish(steps ?? baseSteps)
         }
@@ -108,19 +118,90 @@ struct Provider: TimelineProvider {
             finishOnce(nil)
             return
         }
+        // 暂停期间不推算归零：暂停就是「别催我」，算出个新一轮反而更吵。
+        if let until = snap.pausedUntil, until > now {
+            finishOnce(nil)
+            return
+        }
         guard CMPedometer.isStepCountingAvailable() else {
             finishOnce(nil)
             return
         }
-        // 必须持住这个对象。写成 `CMPedometer().queryPedometerData(...)` 的话，
-        // 它是临时实例，方法一返回就被释放，回调永远不会来 ——
-        // 表盘会一直停在「还差 — 步」。用完再放掉。
-        let pedometer = CMPedometer()
-        Self.pedometer = pedometer
-        pedometer.queryPedometerData(from: anchor, to: now) { data, _ in
-            Self.pedometer = nil
-            finishOnce(data.map { Int(truncating: $0.numberOfSteps) })
+
+        // ★ 走满归零：表盘自己算，不等 App 醒。
+        //
+        // watchOS 不给 App 真常驻 —— 主 App 被挂起后，「走够 200 步该归零」
+        // 这个决定就没人做了，表盘只能卡在「还差 0 步」等系统下次唤醒 App。
+        // 实测那个等待是 15 分钟，用户看到的就是「第二轮都在催了，
+        // 表盘还停在上一条」。
+        //
+        // 表盘扩展自己有 CMPedometer 权限（NSMotionUsageDescription 已声明），
+        // 被系统问到的那一刻，可以用二分把「什么时候达到 target 步」算出来。
+        // 那一刻就是新一轮的起点 —— 和主 App 的归零逻辑一致（走满即重置）。
+        //
+        // 成本：只在「确实已走满」时才做，最多 7 次本地查询（亚秒级），
+        // 而且发生在系统本来就要问我们的那一次，不额外消耗刷新预算。
+        let target = max(1, snap.targetSteps)
+        query(from: anchor, to: now) { total in
+            guard let total, total >= target else {
+                finishOnce(total)
+                return
+            }
+            roll(anchor: anchor, now: now, target: target, depth: 0) { rolledAt, rest in
+                finish(rest, anchorOverride: rolledAt)
+            }
         }
+    }
+
+    /// 查 a→b 的步数。
+    ///
+    /// 必须持住 CMPedometer 实例：写成 `CMPedometer().queryPedometerData(...)`
+    /// 的话它是临时实例，方法一返回就被释放，回调永远不会来 ——
+    /// 表盘会一直停在「还差 — 步」。用完再放掉。
+    private func query(from a: Date, to b: Date, done: @escaping (Int?) -> Void) {
+        let p = CMPedometer()
+        Self.pedometer = p
+        p.queryPedometerData(from: a, to: b) { data, _ in
+            Self.pedometer = nil
+            done(data.map { Int(truncating: $0.numberOfSteps) })
+        }
+    }
+
+    /// 找出本轮达到 target 步的时刻（二分），把它当作新一轮的起点。
+    ///
+    /// 精度 60 秒就够 —— 用户看的是「本轮剩 12 分钟」和「还差 30 步」，
+    /// 起点差几十秒看不出来。再往下二分也没意义：CMPedometer 本身按分钟聚合。
+    ///
+    /// depth 用来兜住「App 睡了很久、期间走满好几轮」的情况。
+    /// 不循环的话，推算出来的新一轮可能起点也已经满了，视图会卡在「已满」。
+    private func roll(anchor: Date, now: Date, target: Int, depth: Int,
+                      done: @escaping (Date, Int) -> Void) {
+        var lo = anchor
+        var hi = now
+        var iter = 0
+
+        func go() {
+            // 7 次二分把区间收到 ~60 秒（30 分钟窗口的 1/32）。
+            if iter >= 7 || hi.timeIntervalSince(lo) <= 60 {
+                // hi 附近就是走满的时刻。这一轮之后还剩多少步，交给下一段算。
+                query(from: hi, to: now) { rest in
+                    let r = rest ?? 0
+                    if r >= target && depth < 3 {
+                        roll(anchor: hi, now: now, target: target, depth: depth + 1, done: done)
+                    } else {
+                        done(hi, r)
+                    }
+                }
+                return
+            }
+            iter += 1
+            let mid = lo.addingTimeInterval(hi.timeIntervalSince(lo) / 2)
+            query(from: anchor, to: mid) { s in
+                if let v = s, v >= target { hi = mid } else { lo = mid }
+                go()
+            }
+        }
+        go()
     }
 
     /// 查询期间保活用。同一时刻只有一个查询，够用。
