@@ -33,6 +33,12 @@ struct Provider: TimelineProvider {
         completion(Entry(date: Date(), snapshot: SharedSnapshot.load(), roundSteps: nil))
     }
 
+    /// 本轮到期时刻 = 锚点 + 窗口长度。和视图里的算法保持一致。
+    private func deadlineOf(_ snap: SharedSnapshot?) -> Date? {
+        guard let snap, let anchor = snap.anchor else { return nil }
+        return anchor.addingTimeInterval(TimeInterval(snap.windowMinutes * 60))
+    }
+
     /// 表盘自己用 CMPedometer 从锚点算到现在。
     ///
     /// 这样**不依赖主 App 是否还活着** —— App 被杀掉，步数照样是新算的，
@@ -46,17 +52,45 @@ struct Provider: TimelineProvider {
         // reloadTimelines，这一条只是兜底 —— 万一 App 没在跑，也别让表盘
         // 一直挂着老数据。15 分钟足够，且远在系统预算之内。
         func finish(_ steps: Int?) {
-            let retry = now.addingTimeInterval(15 * 60)
-            completion(Timeline(entries: [Entry(date: now, snapshot: snap, roundSteps: steps)],
-                                policy: .after(retry)))
+            // 除了「现在」这一条，还要在**到期那一刻**放一条。
+            //
+            // 为什么必须这样：倒计时用的是 Text(_, style: .timer)，那是系统
+            // 从某个时刻开始的计时器，过了零点会继续往上加。整条时间线只有
+            // 「现在」一条的话，跨过零点没有新条目来顶替它，用户就会看到
+            // 「一轮都结束了，它还在往上增加」。
+            //
+            // 放一条 date == deadline 的 entry，系统到点自动切过去，
+            // 那条的子行是「该动了」，不依赖 App 是否还活着。
+            var entries = [Entry(date: now, snapshot: snap, roundSteps: steps)]
+            if let d = deadlineOf(snap), d > now {
+                entries.append(Entry(date: d, snapshot: snap, roundSteps: steps))
+                entries.append(Entry(date: d.addingTimeInterval(1), snapshot: snap, roundSteps: steps))
+            }
+            // 5 分钟兜底：扩展崩溃/被系统压制时，至少这个间隔后还会再被问一次。
+            // 15 分钟太长了 —— 用户拉手腕看到的步数会明显落后。
+            completion(Timeline(entries: entries,
+                                policy: .after(now.addingTimeInterval(5 * 60))))
+        }
+
+        // CMPedometer 的回调不一定按时来（权限被拒、系统忙都可能）。
+        // 不设看门狗的话 completion 永远不调用 = 这一格永远没有新数据，
+        // 系统会一直显示上一次的旧画面。所以到点必给一个结果。
+        var answered = false
+        func finishOnce(_ steps: Int?) {
+            guard !answered else { return }
+            answered = true
+            finish(steps)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            finishOnce(snap?.roundSteps)
         }
 
         guard let snap, snap.enabled, let anchor = snap.anchor, anchor < now else {
-            finish(nil)
+            finishOnce(nil)
             return
         }
         guard CMPedometer.isStepCountingAvailable() else {
-            finish(snap.roundSteps)
+            finishOnce(snap.roundSteps)
             return
         }
         // 必须持住这个对象。写成 `CMPedometer().queryPedometerData(...)` 的话，
@@ -66,7 +100,7 @@ struct Provider: TimelineProvider {
         Self.pedometer = pedometer
         pedometer.queryPedometerData(from: anchor, to: now) { data, _ in
             Self.pedometer = nil
-            finish(data.map { Int(truncating: $0.numberOfSteps) })
+            finishOnce(data.map { Int(truncating: $0.numberOfSteps) })
         }
     }
 

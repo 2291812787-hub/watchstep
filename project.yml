@@ -18,8 +18,8 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "4.5"
-    CURRENT_PROJECT_VERSION: "35"
+    MARKETING_VERSION: "4.6"
+    CURRENT_PROJECT_VERSION: "36"
     SWIFT_VERSION: "5.0"
     # 自签路线：手动签名，不自动要描述文件
     CODE_SIGN_STYLE: Manual
@@ -125,6 +125,10 @@ targets:
         # containing parent app"）。三处都走同一组构建变量，不要手写数字。
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # 这一条以前漏了，是表盘永远不动的真凶。
+        # 扩展里用 CMPedometer 读步数，缺少这句 watchOS 会直接终止扩展进程，
+        # 表现就是：步数冻结、进度条冻结，只有系统自己画的倒计时还在走。
+        NSMotionUsageDescription: 读取步数，用于在表盘显示本轮进度。
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
