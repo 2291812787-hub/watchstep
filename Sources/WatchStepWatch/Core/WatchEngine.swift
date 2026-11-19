@@ -94,6 +94,24 @@ final class WatchEngine: ObservableObject {
 
     // MARK: - 主循环
 
+    /// 通知在**前台**被系统呈现时补记一笔。
+    ///
+    /// 系统的既定行为：窗口在前台时呈现的通知**不会进入通知中心的「已投递」列表**，
+    /// 所以 NotificationPlanner.consumeDelivered 永远看不见它，lastNudgeAt 就不会更新。
+    /// 引擎于是以为「这一轮还没催过」，几十秒后自己又发一条 ——
+    /// 用户看到的就是「还差 100 步」过了几秒变成「还差 50 步」。
+    ///
+    /// 后台的通知会正常进通知中心，走 consumeDelivered 那条路即可；
+    /// 这里补的是前台这一条盲区。
+    func notePresented(_ identifier: String) {
+        let now = Date()
+        let last = AnchorStore.shared.lastNudgeAt
+        // 只往前记，不往回拨：同一条通知可能触发多次回调。
+        if last == nil || now.timeIntervalSince(last!) >= 0.5 {
+            AnchorStore.shared.lastNudgeAt = now
+        }
+    }
+
     func tick(force: Bool) {
         // ---- 步数上报：先于一切判断 ----
         //
@@ -314,11 +332,25 @@ final class WatchEngine: ObservableObject {
             // minGap 挡掉，挡掉之后旧条不该还挂在那儿。
             NotificationPlanner.shared.clearDeliveredNotificationCenter()
 
-            NotificationPlanner.shared.fireNow(
-                body: "已满 \(cfg.targetSteps) 步 · 本轮 \(Int(now.timeIntervalSince(anchor) / 60)) 分钟，重新开始计时",
-                title: "走够了",
-                now: now
-            )
+            // 25 秒内刚被催过，就只更新界面、不再弹第二条。
+            //
+            // 这是「前一条说还差 8 步、马上又来一条说走满了」的根源：
+            // 预排链那条是系统**准时**弹的，弹的时候 App 还在睡；
+            // App 醒过来一读步数发现已经够了，于是又发一条「已满」。
+            // 两条消息本身各自都对，凑在一起就是自打嘴巴。
+            //
+            // 前台时用户正看着屏幕，界面会立刻变成「已满 / 新一轮」，
+            // 加上成功震动已经足够清楚；后台才真正需要那条通知。
+            let justNudged = AnchorStore.shared.lastNudgeAt.map {
+                now.timeIntervalSince($0) < 25
+            } ?? false
+            if !(justNudged && !isBackgroundNow()) {
+                NotificationPlanner.shared.fireNow(
+                    body: "已满 \(cfg.targetSteps) 步 · 本轮 \(Int(now.timeIntervalSince(anchor) / 60)) 分钟，重新开始计时",
+                    title: "走够了",
+                    now: now
+                )
+            }
             nudgesToday = AnchorStore.shared.nudgesToday
 
         case .nudge:

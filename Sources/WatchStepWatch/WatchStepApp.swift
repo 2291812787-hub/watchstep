@@ -30,6 +30,11 @@ final class NudgePresenter: NSObject, UNUserNotificationCenterDelegate {
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        // 前台呈现的通知**不会进通知中心**（系统既定行为），因此
+        // getDeliveredNotifications 永远看不到它 —— 引擎的"认账"必然落空，
+        // 它以为这一轮没催过，几十秒后又补一条，用户就看到两条数字不一样的提醒。
+        // 在呈现的当下补记一笔，把这条漏洞从根上堵掉。
+        WatchEngine.shared.notePresented(notification.request.identifier)
         completionHandler([.alert, .sound])
     }
 }
