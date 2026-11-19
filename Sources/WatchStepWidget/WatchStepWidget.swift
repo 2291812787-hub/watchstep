@@ -68,8 +68,11 @@ struct Provider: TimelineProvider {
             }
             // 5 分钟兜底：扩展崩溃/被系统压制时，至少这个间隔后还会再被问一次。
             // 15 分钟太长了 —— 用户拉手腕看到的步数会明显落后。
+            // 90 秒：App 后台 tick 是 60 秒一轮，表盘兜底比它稍长一点，
+            // 这样每轮 tick 漏掉的刷新，最多 90 秒后系统重算一次补上。
+            // 原来 5 分钟太长 —— 走满归零之后用户要盯着一格错数字等五分钟。
             completion(Timeline(entries: entries,
-                                policy: .after(now.addingTimeInterval(5 * 60))))
+                                policy: .after(now.addingTimeInterval(90))))
         }
 
         // CMPedometer 的回调不一定按时来（权限被拒、系统忙都可能）。
