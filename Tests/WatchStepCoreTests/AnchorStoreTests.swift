@@ -35,7 +35,7 @@ final class AnchorStoreTests: XCTestCase {
 
     func testDeadlineAlwaysDerivedFromAnchor() {
         let cfg = Config(enabled: true, targetSteps: 200, windowMinutes: 30, tickMinutes: 5,
-                         startHour: 0, endHour: 0, confirmHapticOnReset: false)
+                         startMinute: 0, endMinute: 0, confirmHapticOnReset: false)
         let store = AnchorStore.shared
         let now = Date()
         store.reset(to: now)

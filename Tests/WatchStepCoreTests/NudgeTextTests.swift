@@ -84,7 +84,7 @@ final class NudgeTextTests: XCTestCase {
         let anchor = Date()
         let now = anchor.addingTimeInterval(31 * 60)
         let cfg = Config(enabled: true, targetSteps: 200, windowMinutes: 30, tickMinutes: 1,
-                         startHour: 0, endHour: 0, confirmHapticOnReset: true)
+                         startMinute: 0, endMinute: 0, confirmHapticOnReset: true)
 
         let d = RuleEngine.decide(anchor: anchor, steps: 200, now: now, config: cfg)
         XCTAssertEqual(d, .satisfied)
@@ -100,7 +100,7 @@ final class NudgeTextTests: XCTestCase {
         let anchor = Date()
         let now = anchor.addingTimeInterval(31 * 60)
         let cfg = Config(enabled: true, targetSteps: 200, windowMinutes: 30, tickMinutes: 1,
-                         startHour: 0, endHour: 0, confirmHapticOnReset: true)
+                         startMinute: 0, endMinute: 0, confirmHapticOnReset: true)
 
         let d = RuleEngine.decide(anchor: anchor, steps: 40, now: now, config: cfg)
         XCTAssertEqual(d, .nudge)

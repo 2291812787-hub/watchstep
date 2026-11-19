@@ -15,7 +15,7 @@ final class RuleEngineTests: XCTestCase {
 
     private var cfg: Config {
         Config(enabled: true, targetSteps: 200, windowMinutes: 30, tickMinutes: 5,
-               startHour: 8, endHour: 22, confirmHapticOnReset: true)
+               startMinute: 8 * 60, endMinute: 22 * 60, confirmHapticOnReset: true)
     }
 
     // MARK: - 验收 1：走够 → 归零，不震
@@ -102,8 +102,8 @@ final class RuleEngineTests: XCTestCase {
 
     func testCrossMidnightWindow() {
         var c = cfg
-        c.startHour = 22
-        c.endHour = 6
+        c.startMinute = 22 * 60
+        c.endMinute = 6 * 60
         XCTAssertTrue(c.isActive(at: date(hour: 23)))
         XCTAssertTrue(c.isActive(at: date(hour: 2)))
         XCTAssertFalse(c.isActive(at: date(hour: 12)))
@@ -111,8 +111,8 @@ final class RuleEngineTests: XCTestCase {
 
     func testFullDayWhenStartEqualsEnd() {
         var c = cfg
-        c.startHour = 0
-        c.endHour = 0
+        c.startMinute = 0
+        c.endMinute = 0
         XCTAssertTrue(c.isActive(at: date(hour: 3)))
         XCTAssertTrue(c.isActive(at: date(hour: 23)))
     }

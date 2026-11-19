@@ -53,7 +53,7 @@ final class ConfigTests: XCTestCase {
         let c = Config.load()
         XCTAssertEqual(c.windowMinutes, 30, "旧存档必须被丢弃，回正式默认值")
         XCTAssertEqual(c.tickMinutes, 5)
-        XCTAssertEqual(c.startHour, 8)
+        XCTAssertEqual(c.startMinute, 8 * 60)
         XCTAssertEqual(c.configVersion, Config().configVersion,
                        "解码失败时整份回到本版默认值，版本号自然等于本版")
     }
@@ -63,7 +63,7 @@ final class ConfigTests: XCTestCase {
         var c = Config()
         c.windowMinutes = 45
         c.tickMinutes = 7
-        c.startHour = 9
+        c.startMinute = 9 * 60
         c.targetSteps = 300
         c.save()
 
@@ -82,8 +82,8 @@ final class ConfigTests: XCTestCase {
 
     func testEightToMidnightIsNotAllDay() {
         var c = Config()
-        c.startHour = 8
-        c.endHour = 0
+        c.startMinute = 8 * 60
+        c.endMinute = 0
         // 8→0 走跨午夜分支：h >= 8 || h < 0 —— 凌晨那几小时必须关掉
         func at(_ hour: Int) -> Date {
             Calendar.current.date(bySettingHour: hour, minute: 0, second: 0, of: Date())!

@@ -13,8 +13,8 @@ final class SurroundingsTests: XCTestCase {
 
     private func base() -> Config {
         var c = Config()
-        c.startHour = 0
-        c.endHour = 0
+        c.startMinute = 0
+        c.endMinute = 0
         return c
     }
 
@@ -87,8 +87,8 @@ final class SurroundingsTests: XCTestCase {
 
     func testOutsideWindowBeatsHardwareState() {
         var c = base()
-        c.startHour = 8
-        c.endHour = 22
+        c.startMinute = 8 * 60
+        c.endMinute = 22 * 60
         let s = Surroundings(charging: true)
         XCTAssertEqual(RuleEngine.quietReason(now: at(23), config: c, surroundings: s), .outsideWindow)
     }
@@ -101,8 +101,8 @@ final class SurroundingsTests: XCTestCase {
 
     func testWindowStartIsTodayWhenPastStart() {
         var c = base()
-        c.startHour = 8
-        c.endHour = 0
+        c.startMinute = 8 * 60
+        c.endMinute = 0
         let now = at(10, 30)
         let start = RuleEngine.windowStart(now: now, config: c)
         XCTAssertNotNil(start)
@@ -112,8 +112,8 @@ final class SurroundingsTests: XCTestCase {
 
     func testWindowStartRollsBackAcrossMidnight() {
         var c = base()
-        c.startHour = 22
-        c.endHour = 6
+        c.startMinute = 22 * 60
+        c.endMinute = 6 * 60
         let now = at(2)
         let start = RuleEngine.windowStart(now: now, config: c)
         XCTAssertNotNil(start)
@@ -123,8 +123,8 @@ final class SurroundingsTests: XCTestCase {
 
     func testWindowStartIsNilWhenAlwaysOn() {
         var c = base()
-        c.startHour = 0
-        c.endHour = 0
+        c.startMinute = 0
+        c.endMinute = 0
         XCTAssertNil(RuleEngine.windowStart(now: at(10), config: c))
     }
 }
