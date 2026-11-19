@@ -114,9 +114,10 @@ struct ComplicationView: View {
         return entry.date > deadline
     }
 
-    /// 走满 = 绿；超时没走够 = 红；其余跟随表盘主题色。
-    /// 注意：这一格在表盘上最终还是由系统按「强调色」渲染，
-    /// 这里的 tint 只在支持全色的场合生效，别指望它一定变成绿色。
+    /// 走满 = 绿；超时没走够 = 红；其余 = 蓝。
+    /// 必须是明确的 Color：以前返回 .accentColor，表盘上会被解析成
+    /// 白/灰（看着就是"没有颜色"），只有 .blue/.green 这种明确的色值
+    /// 才画得出来 —— 用户看到的"走满时是绿的"就是这个原因。
     private var tint: Color {
         if reached { return .green }
         if overdue { return .red }
@@ -167,9 +168,6 @@ struct ComplicationView: View {
 
     var body: some View {
         content
-            // 显式声明全色渲染：不声明的话 watchOS 会把这一格压成单色，
-            // 而且会把整块表盘一起拖去色。
-            .complicationFullColor()
             // accessory 系列要用 AccessoryWidgetBackground()，不能塞 Color.clear。
             // 透明背景在表盘上会被当成「没有背景材质」，跟着一起被去色处理。
             .containerBackground(for: .widget) { AccessoryWidgetBackground() }
@@ -207,10 +205,19 @@ struct ComplicationView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
 
-            // 进度条要真颜色：正常蓝、走满绿、超时红。
-            // 这里必须跟 fullColor 渲染模式配合，否则照样被去色。
-            ProgressView(value: progress)
-                .tint(tint)
+            // 进度条自己画，不用 ProgressView：
+            // 系统在表盘上下文会把 ProgressView 强制画成单色，
+            // 只有自己用 Shape + 明确的 Color 填充才拿得到真颜色。
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.28))
+                    Capsule()
+                        .fill(tint)
+                        .frame(width: max(0, geo.size.width * progress))
+                }
+            }
+            .frame(height: 5)
 
             subline
         }
@@ -225,28 +232,6 @@ struct ComplicationView: View {
         }
         .gaugeStyle(.accessoryCircularCapacity)
         .tint(tint)
-    }
-}
-
-// MARK: - 全色渲染
-
-private struct ComplicationFullColor: ViewModifier {
-    /// `widgetAccentedRenderingMode(.fullColor)` 是 watchOS 11 才有的 API，
-    /// 而部署目标是 10.0，所以必须用 `if #available` 包一层。
-    /// 前两次编译失败都是因为漏了这一步（直接调用 → 报 only available in watchOS 11.0）。
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(watchOS 11.0, *) {
-            content.widgetAccentedRenderingMode(.fullColor)
-        } else {
-            content
-        }
-    }
-}
-
-private extension View {
-    func complicationFullColor() -> some View {
-        modifier(ComplicationFullColor())
     }
 }
 
