@@ -147,6 +147,12 @@ final class StepsUploader {
         ]
         if !note.isEmpty { body["note"] = note }
         body["sent_at"] = ISO8601DateFormatter().string(from: now)
+        // 诊断：把表上主 bundle 的 PlugIns 目录列出来随上报带走。
+        // 表盘复杂功能是 appex，装在 WatchStepWatch.app/PlugIns 下。
+        // iloader 的二进制里没有 "appex" 字样，它很可能不单独签名扩展；
+        // 未签名的扩展系统会拒绝加载 → 表盘那一格渲染不出来。
+        // 这一行能让服务端日志直接回答「appex 到没到表上」，不用靠猜。
+        body["plugins"] = Self.pluginManifest()
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         Self.session.dataTask(with: req) { [weak self] data, resp, err in
@@ -192,5 +198,25 @@ final class StepsUploader {
         let sent = defaults.string(forKey: kLastSent) ?? "从未"
         let result = defaults.string(forKey: kLastResult) ?? "无记录"
         return "上传 \(sent) · \(result)"
+    }
+
+    /// 表上扩展的实际落地情况，随上报一起发出去，服务端日志里就能看出来。
+    ///
+    /// 为什么需要这个：免费签名 + 第三方装机工具（iloader）装带 appex 的包时，
+    /// 扩展有可能根本没被签进手表 —— iloader 的二进制里连 "appex" 这个字符串
+    /// 都没有，它只认 "embedded Watch app"。要是不核实就改代码，会一直在
+    /// 错误的方向上反复试。用这个字段做一次性确认，比再装一遍便宜得多。
+    static func pluginManifest() -> String {
+        let fm = FileManager.default
+        let dir = Bundle.main.bundlePath + "/PlugIns"
+        guard let items = try? fm.contentsOfDirectory(atPath: dir) else {
+            return "no-plugins-dir"
+        }
+        if items.isEmpty { return "empty" }
+        // 只报名字 + appex 有没有自己的二进制，够判断了，别把日志撑爆。
+        return items.map { name -> String in
+            let bin = dir + "/" + name + "/" + (name as NSString).deletingPathExtension
+            return fm.fileExists(atPath: bin) ? "\(name)+bin" : name
+        }.joined(separator: ",")
     }
 }

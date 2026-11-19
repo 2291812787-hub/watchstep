@@ -118,11 +118,6 @@ struct ComplicationView: View {
 
     var body: some View {
         content
-            // 必须显式声明 fullColor。watchOS 11 起复杂功能默认走「accented」渲染，
-            // 会把这一格压成单色；而表盘上只要有一个组件不声明全色，系统会把
-            // **整块表盘**一起压成单色 —— 用户看到的正是「别的颜色全没了，
-            // 只有系统圆环还有色」。系统圆环是系统自己画的，不吃这个开关。
-            .complicationFullColor()
             // accessory 系列要用 AccessoryWidgetBackground()，不能塞 Color.clear。
             // 透明背景在表盘上会被当成「没有背景材质」，跟着一起被去色处理。
             .containerBackground(for: .widget) { AccessoryWidgetBackground() }
@@ -143,9 +138,18 @@ struct ComplicationView: View {
         VStack(alignment: .leading, spacing: 1) {
             Text(headline)
                 .font(.system(size: 17, weight: .bold, design: .rounded))
-                .foregroundStyle(tint)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
+                // 关键：加进「强调色组」。
+                //
+                // watchOS 表盘的复杂功能是 accented 渲染：系统把视图分成两组，
+                // 强调组用表盘主题色，默认组用白色。而且**忽略视图自己的颜色，
+                // 只按 alpha 通道上色**（Apple 文档原文）。
+                //
+                // 所以 foregroundStyle(tint) 在表盘上根本不生效，不标记的话
+                // 这一格就是纯白 —— 也正是整块表盘跟着被压成单色的原因。
+                // 标记之后它会跟系统日历、天气一样用表盘的主题色。
+                .widgetAccentable()
 
             HStack(spacing: 4) {
                 if disabled || paused {
@@ -167,6 +171,8 @@ struct ComplicationView: View {
 
             ProgressView(value: progress)
                 .tint(tint)
+                // 进度条也进强调组，跟着表盘主题色走；不标记的话表盘上是一条白杠。
+                .widgetAccentable()
         }
     }
 
@@ -178,34 +184,9 @@ struct ComplicationView: View {
         }
         .gaugeStyle(.accessoryCircularCapacity)
         .tint(tint)
-    }
-}
-
-// MARK: - 全色渲染
-
-/// 让表盘保住颜色。
-///
-/// `.widgetAccentedRenderingMode(.fullColor)` 是 watchOS 11 才有的 API，
-/// 而我们最低支持 10.0，所以用 availability 判断而不是抬部署目标
-/// —— 抬了没事，但没必要为了一个修饰符抬高整个 App 的门槛。
-///
-/// 写成 ViewModifier 而不是 `extension View` 的返回 `some View` 的函数：
-/// 后者在 Swift 5.0 语言模式下，`@ViewBuilder` 里对 `Self` 的类型推断会失败
-/// （报 "value of type 'Self' has no member 'widgetAccentedRenderingMode'"）。
-/// ViewModifier 的 `Content` 是具体类型，没这个问题。
-private struct ComplicationFullColor: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(watchOS 11.0, *) {
-            content.widgetAccentedRenderingMode(.fullColor)
-        } else {
-            content
-        }
-    }
-}
-
-private extension View {
-    func complicationFullColor() -> some View {
-        modifier(ComplicationFullColor())
+        // 表盘上小圆圈槽位默认是单色的。进强调组后它会用表盘主题色，
+        // 和系统的活动圆环一样有颜色，而不是一格白图标。
+        .widgetAccentable()
     }
 }
 
