@@ -183,19 +183,29 @@ struct ComplicationView: View {
 
 // MARK: - 全色渲染
 
-private extension View {
-    /// 让表盘保住颜色。
-    ///
-    /// `.widgetAccentedRenderingMode(.fullColor)` 是 watchOS 11 才有的 API，
-    /// 而我们最低支持 10.0，所以包一层 availability 判断而不是抬部署目标
-    /// —— 抬了没事，但没必要为了一个修饰符抬高整个 App 的门槛。
-    @ViewBuilder
-    func complicationFullColor() -> some View {
+/// 让表盘保住颜色。
+///
+/// `.widgetAccentedRenderingMode(.fullColor)` 是 watchOS 11 才有的 API，
+/// 而我们最低支持 10.0，所以用 availability 判断而不是抬部署目标
+/// —— 抬了没事，但没必要为了一个修饰符抬高整个 App 的门槛。
+///
+/// 写成 ViewModifier 而不是 `extension View` 的返回 `some View` 的函数：
+/// 后者在 Swift 5.0 语言模式下，`@ViewBuilder` 里对 `Self` 的类型推断会失败
+/// （报 "value of type 'Self' has no member 'widgetAccentedRenderingMode'"）。
+/// ViewModifier 的 `Content` 是具体类型，没这个问题。
+private struct ComplicationFullColor: ViewModifier {
+    func body(content: Content) -> some View {
         if #available(watchOS 11.0, *) {
-            self.widgetAccentedRenderingMode(.fullColor)
+            content.widgetAccentedRenderingMode(.fullColor)
         } else {
-            self
+            content
         }
+    }
+}
+
+private extension View {
+    func complicationFullColor() -> some View {
+        modifier(ComplicationFullColor())
     }
 }
 
