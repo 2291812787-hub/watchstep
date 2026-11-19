@@ -1,6 +1,7 @@
 import Foundation
 import WatchKit
 import Combine
+import WidgetKit
 
 /// 引擎：把「状态 → 判定 → 动作 → 通知对账」串成一条链。
 /// 所有入口（前台 tick、后台刷新、开机、用户点按钮）都调同一个 `tick`，
@@ -12,6 +13,10 @@ final class WatchEngine: ObservableObject {
 
     @Published private(set) var config: Config
     @Published private(set) var stepsInWindow: Int = 0
+    /// 上次让表盘重读的时间，和上次发布的锚点。
+    /// 表盘刷新有预算，不能每轮 tick 都喊。
+    private var lastWidgetReload = Date.distantPast
+    private var lastPublishedAnchor: Date?
     @Published private(set) var lastDecision: Decision = .unknown
     @Published private(set) var lastCheckAt: Date?
     @Published private(set) var nudgesToday: Int = 0
@@ -219,13 +224,7 @@ final class WatchEngine: ObservableObject {
             let liveAnchor = AnchorStore.shared.anchor
             let liveSteps = liveAnchor > anchor ? 0 : steps
             self.reconcileNotifications(steps: liveSteps, anchor: liveAnchor, now: Date(), cfg: cfg)
-            // 表盘要在锚点重置的同一瞬间看到新值，所以用 reset 后的 liveAnchor。
-            SharedSnapshot.publish(anchor: liveAnchor,
-                                   target: cfg.targetSteps,
-                                   window: cfg.windowMinutes,
-                                   roundSteps: liveSteps ?? 0,
-                                   enabled: cfg.enabled,
-                                   pausedUntil: cfg.pausedUntil)
+            self.publishSnapshot(liveAnchor: liveAnchor, liveSteps: liveSteps ?? 0, cfg: cfg)
             self.busy = false
             self.busySince = nil
             if self.pendingForce {
@@ -265,6 +264,27 @@ final class WatchEngine: ObservableObject {
         }
 
         return stored
+    }
+
+    /// 把当前状态写进 App Group 快照，并让表盘重读。
+    ///
+    /// 只写不喊是没用的：表盘的 timeline 由系统排期，App 不主动
+    /// `reloadTimelines` 的话，新一轮要等系统下一次来问才显示（最长 5 分钟），
+    /// 用户看到的就是「通知已经说新一轮了，表盘还停在上一轮」。
+    /// reload 有预算，所以节流：锚点变了必须喊，纯步数变化 90 秒一次。
+    private func publishSnapshot(liveAnchor: Date, liveSteps: Int, cfg: Config) {
+        SharedSnapshot.publish(anchor: liveAnchor,
+                               target: cfg.targetSteps,
+                               window: cfg.windowMinutes,
+                               roundSteps: liveSteps,
+                               enabled: cfg.enabled,
+                               pausedUntil: cfg.pausedUntil)
+        let now = Date()
+        let anchorChanged = lastPublishedAnchor != liveAnchor
+        lastPublishedAnchor = liveAnchor
+        guard anchorChanged || now.timeIntervalSince(lastWidgetReload) >= 90 else { return }
+        lastWidgetReload = now
+        WidgetCenter.shared.reloadTimelines(ofKind: "WatchStepComplication")
     }
 
     private func apply(steps: Int?, anchor: Date, now: Date, cfg: Config) {
@@ -740,12 +760,9 @@ final class WatchEngine: ObservableObject {
         // 配置一改就立刻推快照，不等下一轮 tick。
         // 用户在设置里把 200 改成 300，抬腕看表盘应该马上是 300 ——
         // 等 tick 的话可能是几分钟后，App 甚至已经睡了，那就永远不更新。
-        SharedSnapshot.publish(anchor: AnchorStore.shared.anchor,
-                               target: c.targetSteps,
-                               window: c.windowMinutes,
-                               roundSteps: stepsInWindow,
-                               enabled: c.enabled,
-                               pausedUntil: c.pausedUntil)
+        publishSnapshot(liveAnchor: AnchorStore.shared.anchor,
+                        liveSteps: stepsInWindow,
+                        cfg: c)
 
         StepReader.shared.invalidateCache()
         tick(force: true)

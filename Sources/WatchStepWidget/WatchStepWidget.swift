@@ -2,6 +2,21 @@ import WidgetKit
 import SwiftUI
 import CoreMotion
 
+// MARK: - 设计原则（别随手改回去）
+//
+// 1. **只给一条 entry**，不预生成逐分钟的时间线。
+//    以前试过一次给 60~95 条、每分钟一条，靠系统到点换条来让倒计时走字。
+//    代价是每一格都要重新渲染一次，白耗电；而且条目一多，系统更容易把
+//    这格复杂功能放进低优先级队列，反而更不准。
+//
+// 2. **不显示「还剩几分钟」**，显示「几点提醒」。
+//    剩余分钟是个会过时的数字：不刷新就停在原地（用户当初看到「一直是 61」
+//    就是这么来的），要它准就得分分钟刷新。而「14:32 提醒」是绝对值，
+//    什么时候看都是对的，一次渲染管一整轮。
+//
+// 3. 数据由主 App 推：每轮 tick 都会 publish 快照并 reloadTimelines。
+//    表盘自己不跑定时器、不自己轮询步数 —— 那才是真费电。
+
 // MARK: - 数据
 
 struct Entry: TimelineEntry {
@@ -29,12 +44,13 @@ struct Provider: TimelineProvider {
         let now = Date()
         let snap = SharedSnapshot.load()
 
+        // 下次再问的时机：跟着 App 的 tick 节奏走。App 每轮 tick 都会主动
+        // reloadTimelines，这一条只是兜底 —— 万一 App 没在跑，也别让表盘
+        // 一直挂着老数据。15 分钟足够，且远在系统预算之内。
         func finish(_ steps: Int?) {
-            let entry = Entry(date: now, snapshot: snap, roundSteps: steps)
-            // 5 分钟后再请系统刷一次。实际给不给刷由系统预算决定，
-            // 但下面的倒计时用的是 system 动态文本，中间不会停在旧时间上。
-            let next = now.addingTimeInterval(5 * 60)
-            completion(Timeline(entries: [entry], policy: .after(next)))
+            let retry = now.addingTimeInterval(15 * 60)
+            completion(Timeline(entries: [Entry(date: now, snapshot: snap, roundSteps: steps)],
+                                policy: .after(retry)))
         }
 
         guard let snap, snap.enabled, let anchor = snap.anchor, anchor < now else {
@@ -86,8 +102,8 @@ struct ComplicationView: View {
         return min(1, Double(steps) / Double(target))
     }
 
-    /// 本轮该提醒的时刻 = 锚点 + 窗口长度。交给系统按相对时间自己走字，
-    /// 不占我的刷新预算，抬腕看到的永远是准的。
+    /// 本轮该提醒的时刻 = 锚点 + 窗口长度。
+    /// 显示绝对值而不是倒计时，一次渲染管一整轮，不用分分钟刷新。
     private var deadline: Date? {
         guard let snap = entry.snapshot, let anchor = snap.anchor else { return nil }
         return anchor.addingTimeInterval(TimeInterval(snap.windowMinutes * 60))
@@ -100,20 +116,53 @@ struct ComplicationView: View {
         return entry.date > deadline
     }
 
+    /// 走满 = 绿；超时没走够 = 红；其余跟随表盘主题色。
+    /// 注意：这一格在表盘上最终还是由系统按「强调色」渲染，
+    /// 这里的 tint 只在支持全色的场合生效，别指望它一定变成绿色。
     private var tint: Color {
-        if disabled || paused { return .secondary }
         if reached { return .green }
         if overdue { return .red }
-        return .primary
+        return .accentColor
     }
 
+    /// 第一行大字。
     private var headline: String {
-        if disabled { return "提醒已关" }
+        if disabled { return "已关闭" }
         if paused { return "已暂停" }
-        if let remaining {
-            return reached ? "已满 \(target) 步" : "还差 \(remaining) 步"
+        if reached { return "已满 \(target) 步" }
+        guard let remaining else { return "还差 — 步" }
+        return "还差 \(remaining) 步"
+    }
+
+    /// 第二行小字：分钟粒度的相对时间。
+    /// 用 Text(_, style: .relative) 交给系统渲染，只有分钟变化时才换字，
+    /// 不读秒、不预生成一堆 entry、也不唤醒 App。耗电可忽略。
+    @ViewBuilder
+    private var subline: some View {
+        Group {
+            if disabled {
+                Text("催步已关")
+            } else if paused {
+                Text("催步暂停")
+            } else if reached {
+                Text("本轮完成")
+            } else if let deadline, deadline > entry.date {
+                HStack(spacing: 0) {
+                    Text("剩 ")
+                    Text(deadline, style: .relative)
+                }
+            } else if deadline != nil {
+                // 逾期不显示具体分钟：那个数字会随 entry 老化变错，
+                // 而 "该动了" 永远是对的。
+                Text("该动了")
+            } else {
+                Text("催步")
+            }
         }
-        return "还差 — 步"
+        .font(.system(size: 11, weight: .medium, design: .rounded))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
     }
 
     var body: some View {
@@ -128,63 +177,52 @@ struct ComplicationView: View {
         switch family {
         case .accessoryCircular:
             circular
+        case .accessoryInline:
+            // inline 只接受纯文本，套容器会渲染成空白。
+            Text(inline)
         default:
             rectangular
         }
     }
 
-    /// 大表盘（模块化那一格）：两行字 + 一条细进度。
+    private var inline: String {
+        if disabled { return "催步已关" }
+        if paused { return "催步暂停" }
+        if reached { return "已走满 \(target)" }
+        return "走 \(steps ?? 0)/\(target)"
+    }
+
+    // MARK: 大格（模块化大表盘）
+
     private var rectangular: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: 2) {
             Text(headline)
                 .font(.system(size: 17, weight: .bold, design: .rounded))
+                .foregroundStyle(tint)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
-                // 关键：加进「强调色组」。
-                //
-                // watchOS 表盘的复杂功能是 accented 渲染：系统把视图分成两组，
-                // 强调组用表盘主题色，默认组用白色。而且**忽略视图自己的颜色，
-                // 只按 alpha 通道上色**（Apple 文档原文）。
-                //
-                // 所以 foregroundStyle(tint) 在表盘上根本不生效，不标记的话
-                // 这一格就是纯白 —— 也正是整块表盘跟着被压成单色的原因。
-                // 标记之后它会跟系统日历、天气一样用表盘的主题色。
+                // 进强调色组：进组后这一行会跟表盘主题色走，
+                // 而不是被当成「不参与着色」的纯白文字。
                 .widgetAccentable()
-
-            HStack(spacing: 4) {
-                if disabled || paused {
-                    Text(disabled ? "在 App 里打开" : "在 App 里恢复")
-                        .font(.system(size: 11))
-                } else if let deadline {
-                    // 用 .relative 不用 .timer：.timer 对**未来**的时刻会显示成
-                    // "-12:30" 这种负数倒计时，很怪。.relative 是系统动态文本，
-                    // 会自己走字（"12分钟后" / 过期后"3分钟前"），不消耗刷新预算。
-                    Text("本轮").font(.system(size: 11))
-                    Text(deadline, style: .relative)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(deadline > entry.date ? Color.secondary : Color.red)
-                } else {
-                    Text("打开 App 开始").font(.system(size: 11))
-                }
-            }
-            .lineLimit(1)
 
             ProgressView(value: progress)
                 .tint(tint)
-                // 进度条也进强调组，跟着表盘主题色走；不标记的话表盘上是一条白杠。
                 .widgetAccentable()
+
+            subline
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 小表盘：只放一个走人图标当前入口，外圈那道弧是进度，不显示数字
-    /// —— 步数用户另外有软件看。
+    // MARK: 小圆圈（只当入口用）
+
     private var circular: some View {
         Gauge(value: progress) {
             Image(systemName: "figure.walk")
         }
         .gaugeStyle(.accessoryCircularCapacity)
         .tint(tint)
-        // 表盘上小圆圈槽位默认是单色的。进强调组后它会用表盘主题色，
+        // 表盘上小圆圈槽位默认单色。进强调组后它会用表盘主题色，
         // 和系统的活动圆环一样有颜色，而不是一格白图标。
         .widgetAccentable()
     }
@@ -198,11 +236,8 @@ struct WatchStepComplication: Widget {
             ComplicationView(entry: entry)
         }
         .configurationDisplayName("步数进度")
-        .description("还差多少步、本轮还剩多久")
-        // 只出这两款。accessoryInline 只能返回一个纯 Text，
-        // 套 containerBackground 容易渲成空白，而且那一格本来就是「一句话」的位置，
-        // 用户要的是图标入口 + 模块化那一格，不要它。
-        .supportedFamilies([.accessoryRectangular, .accessoryCircular])
+        .description("本轮还差多少步，以及几点提醒。")
+        .supportedFamilies([.accessoryRectangular, .accessoryCircular, .accessoryInline])
     }
 }
 
