@@ -120,7 +120,7 @@ struct ComplicationView: View {
     private var tint: Color {
         if reached { return .green }
         if overdue { return .red }
-        return .accentColor
+        return .blue
     }
 
     /// 第一行大字。
@@ -167,6 +167,9 @@ struct ComplicationView: View {
 
     var body: some View {
         content
+            // 显式声明全色渲染：不声明的话 watchOS 会把这一格压成单色，
+            // 而且会把整块表盘一起拖去色。
+            .complicationFullColor()
             // accessory 系列要用 AccessoryWidgetBackground()，不能塞 Color.clear。
             // 透明背景在表盘上会被当成「没有背景材质」，跟着一起被去色处理。
             .containerBackground(for: .widget) { AccessoryWidgetBackground() }
@@ -196,18 +199,18 @@ struct ComplicationView: View {
 
     private var rectangular: some View {
         VStack(alignment: .leading, spacing: 2) {
+            // 标题就用白色。不要 widgetAccentable —— 进强调组会跟着
+            // 表盘主题色跑，反而不是我们想要的白。
             Text(headline)
                 .font(.system(size: 17, weight: .bold, design: .rounded))
-                .foregroundStyle(tint)
+                .foregroundStyle(.white)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
-                // 进强调色组：进组后这一行会跟表盘主题色走，
-                // 而不是被当成「不参与着色」的纯白文字。
-                .widgetAccentable()
 
+            // 进度条要真颜色：正常蓝、走满绿、超时红。
+            // 这里必须跟 fullColor 渲染模式配合，否则照样被去色。
             ProgressView(value: progress)
                 .tint(tint)
-                .widgetAccentable()
 
             subline
         }
@@ -222,9 +225,28 @@ struct ComplicationView: View {
         }
         .gaugeStyle(.accessoryCircularCapacity)
         .tint(tint)
-        // 表盘上小圆圈槽位默认单色。进强调组后它会用表盘主题色，
-        // 和系统的活动圆环一样有颜色，而不是一格白图标。
-        .widgetAccentable()
+    }
+}
+
+// MARK: - 全色渲染
+
+private struct ComplicationFullColor: ViewModifier {
+    /// `widgetAccentedRenderingMode(.fullColor)` 是 watchOS 11 才有的 API，
+    /// 而部署目标是 10.0，所以必须用 `if #available` 包一层。
+    /// 前两次编译失败都是因为漏了这一步（直接调用 → 报 only available in watchOS 11.0）。
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(watchOS 11.0, *) {
+            content.widgetAccentedRenderingMode(.fullColor)
+        } else {
+            content
+        }
+    }
+}
+
+private extension View {
+    func complicationFullColor() -> some View {
+        modifier(ComplicationFullColor())
     }
 }
 
