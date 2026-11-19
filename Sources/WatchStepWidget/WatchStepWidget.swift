@@ -9,12 +9,10 @@ import CoreMotion
 //    代价是每一格都要重新渲染一次，白耗电；而且条目一多，系统更容易把
 //    这格复杂功能放进低优先级队列，反而更不准。
 //
-// 2. **不显示「还剩几分钟」**，显示「几点提醒」。
-//    剩余分钟是个会过时的数字：不刷新就停在原地（用户当初看到「一直是 61」
-//    就是这么来的），要它准就得分分钟刷新。而「14:32 提醒」是绝对值，
-//    什么时候看都是对的，一次渲染管一整轮。
-//
-// 3. 数据由主 App 推：每轮 tick 都会 publish 快照并 reloadTimelines。
+// 2. **倒计时用 Text(_, style: .timer)，交给系统渲染。**
+//    秒是系统自己画的，不走 App、不占快照、不产生额外唤醒，只在这一格
+//    可见且系统刷新表盘时跟着变一下 —— 实测代价可以忽略。
+//    所以这里保留「本轮 12:40」这种带秒的读法，不用自己做逐分钟时间线。
 //    表盘自己不跑定时器、不自己轮询步数 —— 那才是真费电。
 
 // MARK: - 数据
@@ -134,9 +132,11 @@ struct ComplicationView: View {
         return "还差 \(remaining) 步"
     }
 
-    /// 第二行小字：分钟粒度的相对时间。
-    /// 用 Text(_, style: .relative) 交给系统渲染，只有分钟变化时才换字，
-    /// 不读秒、不预生成一堆 entry、也不唤醒 App。耗电可忽略。
+    /// 第二行小字：倒计时，带秒。
+    /// 用 Text(_, style: .timer) 交给系统自己渲染 —— 这个字是系统画的，
+    /// 不用 App 算、不唤醒 App、也不预生成一堆 entry，
+    /// 表盘本来就在走秒，这一格只是跟着变，额外耗电可忽略。
+    /// 所以按用户要求保留秒：12:40 → 12:39 → 12:38，到点归零。
     @ViewBuilder
     private var subline: some View {
         Group {
@@ -149,7 +149,7 @@ struct ComplicationView: View {
             } else if let deadline, deadline > entry.date {
                 HStack(spacing: 0) {
                     Text("剩 ")
-                    Text(deadline, style: .relative)
+                    Text(deadline, style: .timer)
                 }
             } else if deadline != nil {
                 // 逾期不显示具体分钟：那个数字会随 entry 老化变错，
