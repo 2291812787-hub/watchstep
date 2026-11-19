@@ -66,13 +66,18 @@ struct Provider: TimelineProvider {
                 entries.append(Entry(date: d, snapshot: snap, roundSteps: steps))
                 entries.append(Entry(date: d.addingTimeInterval(1), snapshot: snap, roundSteps: steps))
             }
-            // 5 分钟兜底：扩展崩溃/被系统压制时，至少这个间隔后还会再被问一次。
-            // 15 分钟太长了 —— 用户拉手腕看到的步数会明显落后。
-            // 90 秒：App 后台 tick 是 60 秒一轮，表盘兜底比它稍长一点，
-            // 这样每轮 tick 漏掉的刷新，最多 90 秒后系统重算一次补上。
-            // 原来 5 分钟太长 —— 走满归零之后用户要盯着一格错数字等五分钟。
+            // 兜底节奏：这是「系统下次来问扩展」的时间，属于**要花预算**的动作，
+            // 和 App 侧的 reloadTimelines 抢同一份配额。
+            //
+            // 4.9 收到 90 秒是错的：App 每 60 秒喊一次 + 扩展每 90 秒被问一次，
+            // 两份加起来远远超过 watchOS 给一块复杂功能的每小时额度，结果就是
+            // 真正要紧的那一次（走满归零）被挤掉。
+            //
+            // 现在放回 10 分钟：每小时 6 次。这一格要更新步数，主要靠 App 侧
+            // 归零时的 reload（必喊）和 5 分钟一次的步数刷新，不靠这里的兜底。
+            // 这里只负责「App 完全没在跑，也别让表盘永远挂着老数据」。
             completion(Timeline(entries: entries,
-                                policy: .after(now.addingTimeInterval(90))))
+                                policy: .after(now.addingTimeInterval(600))))
         }
 
         // CMPedometer 的回调不一定按时来（权限被拒、系统忙都可能）。

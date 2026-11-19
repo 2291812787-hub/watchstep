@@ -17,6 +17,13 @@ final class WatchEngine: ObservableObject {
     /// 表盘刷新有预算，不能每轮 tick 都喊。
     private var lastWidgetReload = Date.distantPast
     private var lastPublishedAnchor: Date?
+    /// 本次运行一共喊了表盘多少次、最后一次是几点。自检页直接摆出来。
+    ///
+    /// 这不是装饰：表盘不刷新的病因如果是「预算被我们自己撞满」，
+    /// 那么唯一能证伪它的办法就是数出来「一小时到底喊了几次」。
+    /// 之前所有争论都停留在猜，缺的就是这个数。
+    private(set) var widgetReloadCount = 0
+    private(set) var lastWidgetReloadAt: Date?
     @Published private(set) var lastDecision: Decision = .unknown
     @Published private(set) var lastCheckAt: Date?
     @Published private(set) var nudgesToday: Int = 0
@@ -268,11 +275,25 @@ final class WatchEngine: ObservableObject {
 
     /// 把当前状态写进 App Group 快照，并让表盘重读。
     ///
-    /// 只写不喊是没用的：表盘的 timeline 由系统排期，App 不主动
-    /// `reloadTimelines` 的话，新一轮要等系统下一次来问才显示（最长 5 分钟），
-    /// 用户看到的就是「通知已经说新一轮了，表盘还停在上一轮」。
-    /// reload 有预算，所以节流：锚点变了必须喊，纯步数变化 60 秒一次
-    /// （白天常驻会话期间后台 tick 就是 60 秒一轮，对齐后每轮都能刷新）。
+    /// **预算才是这里的硬约束，不是「越勤越好」。**
+    ///
+    /// watchOS 给表盘复杂功能的刷新机会是按小时计的、数量很有限
+    /// （主表盘几十次量级，且同一表盘上每一格都来分摊）。超出部分
+    /// 不报错、不丢日志 —— 系统**静默排队或直接丢掉**。
+    ///
+    /// 我们踩过的坑：4.8 把节流从 90 秒收到 60 秒、4.9 又把表盘侧
+    /// 兜底从 5 分钟收到 90 秒，两个改动都在让请求变多。结果用户看到
+    /// 的是「第二轮都开始催了，表盘还停在上一条」——因为真正关键的
+    /// 那一次（走满归零、锚点变了）被前面几十次步数刷新挤掉了位置。
+    ///
+    /// 那个诡异现象也能对上：「系统来一条通知，表盘随即就刷新了」
+    /// —— 请求没丢，一直排在队里，等系统因为别的事情醒一下顺手处理。
+    ///
+    /// 所以现在的分工：
+    /// - **锚点变了（走满归零 / 重新开始）：立刻喊，不节流。** 一轮里
+    ///   只会发生一两次，是全功能里最该优先通过的那一次。
+    /// - **纯步数变化：5 分钟一次。** 每小时 12 次，给归零那一次留足余量。
+    ///   步数新鲜度由表盘自己被系统问的时候重查 CMPedometer 补上。
     private func publishSnapshot(liveAnchor: Date, liveSteps: Int, cfg: Config) {
         SharedSnapshot.publish(anchor: liveAnchor,
                                target: cfg.targetSteps,
@@ -283,8 +304,32 @@ final class WatchEngine: ObservableObject {
         let now = Date()
         let anchorChanged = lastPublishedAnchor != liveAnchor
         lastPublishedAnchor = liveAnchor
-        guard anchorChanged || now.timeIntervalSince(lastWidgetReload) >= 60 else { return }
+
+        if anchorChanged {
+            // 走满归零 / 新一轮开始：这是全功能里最该被系统执行的那一次。
+            lastWidgetReload = now
+            lastWidgetReloadAt = now
+            widgetReloadCount += 1
+            WidgetCenter.shared.reloadTimelines(ofKind: "WatchStepComplication")
+
+            // 20 秒后补喊一次。
+            //
+            // 单个请求被系统合并进队列、或者赶上表盘正在重绘，都可能白喊。
+            // 一轮只会发生一两次，多喊一次的成本可以忽略，但能把
+            // 「通知说新一轮了，表盘还停在上一条」这个硬伤压下去不少。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+                guard let self else { return }
+                self.widgetReloadCount += 1
+                self.lastWidgetReloadAt = Date()
+                WidgetCenter.shared.reloadTimelines(ofKind: "WatchStepComplication")
+            }
+            return
+        }
+
+        guard now.timeIntervalSince(lastWidgetReload) >= 300 else { return }
         lastWidgetReload = now
+        lastWidgetReloadAt = now
+        widgetReloadCount += 1
         WidgetCenter.shared.reloadTimelines(ofKind: "WatchStepComplication")
     }
 
@@ -1010,6 +1055,18 @@ final class WatchEngine: ObservableObject {
                 }
 
                 lines.append(StepsUploader.shared.statusLine())
+
+                // 8. 表盘到底有没有被喊过 —— 数出来，别再猜。
+                // 一小时都不涨，说明 reload 根本没走到，问题在 App 侧；
+                // 涨得很勤但表盘不动，说明被系统预算压住了，问题在系统侧。
+                let tfm = DateFormatter()
+                tfm.dateFormat = "HH:mm:ss"
+                let cnt = self.widgetReloadCount
+                if let at = self.lastWidgetReloadAt {
+                    lines.append("· 喊表盘 " + String(cnt) + " 次，最近 " + tfm.string(from: at))
+                } else {
+                    lines.append("· 本轮运行还没喊过表盘")
+                }
 
                 self.selfCheckLog = lines
             }
