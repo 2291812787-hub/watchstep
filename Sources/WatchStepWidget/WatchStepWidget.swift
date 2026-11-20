@@ -286,10 +286,22 @@ struct ComplicationView: View {
                     Text("剩 ")
                     Text(deadline, style: .timer)
                 }
-            } else if deadline != nil {
-                // 逾期不显示具体分钟：那个数字会随 entry 老化变错，
-                // 而 "该动了" 永远是对的。
-                Text("该动了")
+            } else if let deadline {
+                // 逾期之后计时继续往上数。
+                //
+                // 原来这里只有 "该动了" 三个字，理由是「具体分钟会随 entry
+                // 老化变错」。那个理由不成立：Text(_, style: .timer) 是系统
+                // 画的秒表，entry 再老它也按真实时间走，那个数永远不会错。
+                //
+                // 而且它比三个字有用得多：看到 "该动了 4:12" 就知道已经逾期
+                // 4 分钟，再按系统约 15 分钟问一次表盘的节奏，能自己估出
+                // 还有多久会跳成正确数字。这正好把「刷新滞后」这件看不见的
+                // 事变成了看得见的数 —— 表盘还在走秒，也说明它还活着。
+                HStack(spacing: 3) {
+                    Text("该动了")
+                    Text(deadline, style: .timer)
+                        .foregroundStyle(.red)
+                }
             } else {
                 Text("催步")
             }
