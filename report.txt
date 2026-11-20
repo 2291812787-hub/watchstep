@@ -1,0 +1,163 @@
+job=test
+status=success
+sha=e598159299430ccb266055151b5ffb25a9478bb9
+run_id=44647674315
+time=2026-11-20T00:40:57Z
+
+======== 日志（末尾 200 行）========
+Building for debugging...
+[Pre-planning 1 / 124]
+[Planning deferred tasks]
+[32 / 56] WatchStepCore
+[33 / 56] WatchStepCore
+[44 / 63] WatchStepCoreTests-product
+[47 / 63] WatchStepCoreTests-product
+/home/runner/work/watchstep/watchstep/Tests/WatchStepCoreTests/SurroundingsTests.swift:97:13: [1;33mwarning: [1;39mvariable 'c' was never mutated; consider changing to 'let' constant[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/variable-never-mutated\VariableNeverMutated]8;;\]
+ [0;36m95 |[0;0m 
+ [0;36m96 |[0;0m     func testOffWristBeatsCharging() {
+ [0;36m97 |[0;0m         var c = base()
+    [0;36m|[0;0m             `- [1;33mwarning: [1;39mvariable 'c' was never mutated; consider changing to 'let' constant[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/variable-never-mutated\VariableNeverMutated]8;;\]
+ [0;36m98 |[0;0m         let s = Surroundings(charging: true, offWrist: true)
+ [0;36m99 |[0;0m         XCTAssertEqual(RuleEngine.quietReason(now: at(10), config: c, surroundings: s), .offWrist)
+
+[#VariableNeverMutated]: <https://docs.swift.org/compiler/documentation/diagnostics/variable-never-mutated>
+[52 / 63] WatchStepCoreTests-product
+[56 / 64] WatchStepCoreTests-product
+[57 / 64] WatchStepCore-product
+[60 / 67] WatchStepCoreTests-test-runner
+[64 / 67] WatchStepCoreTests-test-runner
+[68 / 68] WatchStepCoreTests-test-runner
+Build complete! (10.48 secs)
+Test Suite 'All tests' started at 2026-11-20 00:40:56.934
+Test Suite 'Debug-linux-x86_64.xctest' started at 2026-11-20 00:40:57.007
+Test Suite 'AnchorStoreTests' started at 2026-11-20 00:40:57.007
+Test Case 'AnchorStoreTests.testAnchorIsStableAcrossReads' started at 2026-11-20 00:40:57.007
+Test Case 'AnchorStoreTests.testAnchorIsStableAcrossReads' passed (0.002 seconds)
+Test Case 'AnchorStoreTests.testDeadlineAlwaysDerivedFromAnchor' started at 2026-11-20 00:40:57.009
+Test Case 'AnchorStoreTests.testDeadlineAlwaysDerivedFromAnchor' passed (0.001 seconds)
+Test Case 'AnchorStoreTests.testLongestIdleNeverDecreases' started at 2026-11-20 00:40:57.010
+Test Case 'AnchorStoreTests.testLongestIdleNeverDecreases' passed (0.001 seconds)
+Test Case 'AnchorStoreTests.testResetClearsNudgeState' started at 2026-11-20 00:40:57.011
+Test Case 'AnchorStoreTests.testResetClearsNudgeState' passed (0.0 seconds)
+Test Suite 'AnchorStoreTests' passed at 2026-11-20 00:40:57.011
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+Test Suite 'ConfigTests' started at 2026-11-20 00:40:57.011
+Test Case 'ConfigTests.testDefaultWindowRunsFromEightUntilMidnight' started at 2026-11-20 00:40:57.011
+Test Case 'ConfigTests.testDefaultWindowRunsFromEightUntilMidnight' passed (0.002 seconds)
+Test Case 'ConfigTests.testEightToMidnightIsNotAllDay' started at 2026-11-20 00:40:57.013
+Test Case 'ConfigTests.testEightToMidnightIsNotAllDay' passed (0.0 seconds)
+Test Case 'ConfigTests.testLegacyArchiveWithoutVersionFallsBackToDefaults' started at 2026-11-20 00:40:57.013
+Test Case 'ConfigTests.testLegacyArchiveWithoutVersionFallsBackToDefaults' passed (0.0 seconds)
+Test Case 'ConfigTests.testOfficialDefaults' started at 2026-11-20 00:40:57.014
+Test Case 'ConfigTests.testOfficialDefaults' passed (0.0 seconds)
+Test Case 'ConfigTests.testSaveThenLoadKeepsDefaultsIntact' started at 2026-11-20 00:40:57.014
+Test Case 'ConfigTests.testSaveThenLoadKeepsDefaultsIntact' passed (0.0 seconds)
+Test Case 'ConfigTests.testSavedConfigRoundTrips' started at 2026-11-20 00:40:57.014
+Test Case 'ConfigTests.testSavedConfigRoundTrips' passed (0.0 seconds)
+Test Suite 'ConfigTests' passed at 2026-11-20 00:40:57.014
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+Test Suite 'NudgeTextTests' started at 2026-11-20 00:40:57.014
+Test Case 'NudgeTextTests.testAlreadyReachedTarget' started at 2026-11-20 00:40:57.014
+Test Case 'NudgeTextTests.testAlreadyReachedTarget' passed (0.0 seconds)
+Test Case 'NudgeTextTests.testApproximateMarksSnapshotSteps' started at 2026-11-20 00:40:57.014
+Test Case 'NudgeTextTests.testApproximateMarksSnapshotSteps' passed (0.0 seconds)
+Test Case 'NudgeTextTests.testNegativeSittingIsClamped' started at 2026-11-20 00:40:57.014
+Test Case 'NudgeTextTests.testNegativeSittingIsClamped' passed (0.0 seconds)
+Test Case 'NudgeTextTests.testOverTargetDoesNotShowNegative' started at 2026-11-20 00:40:57.014
+Test Case 'NudgeTextTests.testOverTargetDoesNotShowNegative' passed (0.0 seconds)
+Test Case 'NudgeTextTests.testReminderSaysEverythingInOneLine' started at 2026-11-20 00:40:57.014
+Test Case 'NudgeTextTests.testReminderSaysEverythingInOneLine' passed (0.0 seconds)
+Test Case 'NudgeTextTests.testStepsUnavailableStillReadsNaturally' started at 2026-11-20 00:40:57.014
+Test Case 'NudgeTextTests.testStepsUnavailableStillReadsNaturally' passed (0.0 seconds)
+Test Case 'NudgeTextTests.testTextAgreesWithRuleEngineAtNudge' started at 2026-11-20 00:40:57.014
+Test Case 'NudgeTextTests.testTextAgreesWithRuleEngineAtNudge' passed (0.0 seconds)
+Test Case 'NudgeTextTests.testTextAgreesWithRuleEngineAtSatisfied' started at 2026-11-20 00:40:57.014
+Test Case 'NudgeTextTests.testTextAgreesWithRuleEngineAtSatisfied' passed (0.0 seconds)
+Test Case 'NudgeTextTests.testTickBelowOneIsClampedToOne' started at 2026-11-20 00:40:57.014
+Test Case 'NudgeTextTests.testTickBelowOneIsClampedToOne' passed (0.0 seconds)
+Test Case 'NudgeTextTests.testTickIntervalIsSpokenAsConfigured' started at 2026-11-20 00:40:57.015
+Test Case 'NudgeTextTests.testTickIntervalIsSpokenAsConfigured' passed (0.0 seconds)
+Test Suite 'NudgeTextTests' passed at 2026-11-20 00:40:57.015
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'RuleEngineTests' started at 2026-11-20 00:40:57.015
+Test Case 'RuleEngineTests.testCrossMidnightWindow' started at 2026-11-20 00:40:57.015
+Test Case 'RuleEngineTests.testCrossMidnightWindow' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testDeadlineAndRemaining' started at 2026-11-20 00:40:57.015
+Test Case 'RuleEngineTests.testDeadlineAndRemaining' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testFullCycleSimulation' started at 2026-11-20 00:40:57.015
+Test Case 'RuleEngineTests.testFullCycleSimulation' passed (0.001 seconds)
+Test Case 'RuleEngineTests.testFullDayWhenStartEqualsEnd' started at 2026-11-20 00:40:57.015
+Test Case 'RuleEngineTests.testFullDayWhenStartEqualsEnd' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testInactiveOutsideWindow' started at 2026-11-20 00:40:57.015
+Test Case 'RuleEngineTests.testInactiveOutsideWindow' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testInactiveWhenDisabled' started at 2026-11-20 00:40:57.015
+Test Case 'RuleEngineTests.testInactiveWhenDisabled' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testKeepsNudgingDuringNudgePhase' started at 2026-11-20 00:40:57.015
+Test Case 'RuleEngineTests.testKeepsNudgingDuringNudgePhase' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testLongIdleWithCumulativeStepsStillNudges' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testLongIdleWithCumulativeStepsStillNudges' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testNeverSilentlyStopsNudging' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testNeverSilentlyStopsNudging' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testNotSatisfiedOneStepShort' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testNotSatisfiedOneStepShort' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testNudgeExactlyAtWindow' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testNudgeExactlyAtWindow' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testQueryStartAtExactWindowBoundary' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testQueryStartAtExactWindowBoundary' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testQueryStartNeverLooksBackMoreThanOneWindow' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testQueryStartNeverLooksBackMoreThanOneWindow' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testQueryStartUsesAnchorWhenWithinWindow' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testQueryStartUsesAnchorWhenWithinWindow' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testSatisfiedIgnoresElapsedTime' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testSatisfiedIgnoresElapsedTime' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testSatisfiedWhenStepsReachTarget' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testSatisfiedWhenStepsReachTarget' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testStopsImmediatelyAfterWalking' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testStopsImmediatelyAfterWalking' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testUnknownWhenStepsUnavailable' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testUnknownWhenStepsUnavailable' passed (0.0 seconds)
+Test Case 'RuleEngineTests.testWaitingBeforeWindow' started at 2026-11-20 00:40:57.016
+Test Case 'RuleEngineTests.testWaitingBeforeWindow' passed (0.0 seconds)
+Test Suite 'RuleEngineTests' passed at 2026-11-20 00:40:57.016
+	 Executed 19 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'SurroundingsTests' started at 2026-11-20 00:40:57.016
+Test Case 'SurroundingsTests.testChargingCanBeTurnedOff' started at 2026-11-20 00:40:57.016
+Test Case 'SurroundingsTests.testChargingCanBeTurnedOff' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testChargingPauses' started at 2026-11-20 00:40:57.016
+Test Case 'SurroundingsTests.testChargingPauses' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testChargingWinsOverLowBattery' started at 2026-11-20 00:40:57.016
+Test Case 'SurroundingsTests.testChargingWinsOverLowBattery' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testDisabledBeatsEverything' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testDisabledBeatsEverything' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testEverythingNormalIsNotQuiet' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testEverythingNormalIsNotQuiet' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testLowBatteryAboveThresholdIsFine' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testLowBatteryAboveThresholdIsFine' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testLowBatteryPauses' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testLowBatteryPauses' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testOffWristBeatsCharging' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testOffWristBeatsCharging' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testOffWristPauses' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testOffWristPauses' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testOutsideWindowBeatsHardwareState' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testOutsideWindowBeatsHardwareState' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testSwitchesTurnPausingOff' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testSwitchesTurnPausingOff' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testUnknownBatteryIsNotTreatedAsEmpty' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testUnknownBatteryIsNotTreatedAsEmpty' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testWindowStartIsNilWhenAlwaysOn' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testWindowStartIsNilWhenAlwaysOn' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testWindowStartIsTodayWhenPastStart' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testWindowStartIsTodayWhenPastStart' passed (0.0 seconds)
+Test Case 'SurroundingsTests.testWindowStartRollsBackAcrossMidnight' started at 2026-11-20 00:40:57.017
+Test Case 'SurroundingsTests.testWindowStartRollsBackAcrossMidnight' passed (0.0 seconds)
+Test Suite 'SurroundingsTests' passed at 2026-11-20 00:40:57.017
+	 Executed 15 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'Debug-linux-x86_64.xctest' passed at 2026-11-20 00:40:57.017
+	 Executed 54 tests, with 0 failures (0 unexpected) in 0.009 (0.009) seconds
+Test Suite 'All tests' passed at 2026-11-20 00:40:57.017
+	 Executed 54 tests, with 0 failures (0 unexpected) in 0.009 (0.009) seconds
+◇ Test run started.
+↳ Testing Library Version: 6.4.2 (288a2328ff84644)
+↳ Target Platform: x86_64-unknown-linux-gnu
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
