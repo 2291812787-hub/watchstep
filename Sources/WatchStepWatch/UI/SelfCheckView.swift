@@ -80,7 +80,12 @@ struct SelfCheckView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.orange)
 
-                Text("网关 重连\(NetGateway.shared.rebuildCount())次 · 路径\(NetGateway.shared.lastPath) · 错码\(NetGateway.shared.lastCode)")
+                // 路径 unsatisfied + 立刻 -1004，是「这个 App 被禁止使用
+                // 无线数据」的典型表现，不是设备没网。两者必须分清，
+                // 否则会一直让人去查路由器/重连 Wi-Fi（走过这条路）。
+                Text(NetGateway.shared.lastPath.contains("unsat")
+                     ? "路径被系统判为无通道 → 本 App 可能未获准使用无线数据"
+                     : "网关 重连\(NetGateway.shared.rebuildCount())次 · 路径\(NetGateway.shared.lastPath) · 错码\(NetGateway.shared.lastCode)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(NetGateway.shared.lastCode == 0 ? Color.secondary : Color.red)
                     .fixedSize(horizontal: false, vertical: true)
@@ -101,7 +106,7 @@ struct SelfCheckView: View {
 
                 Text("待发：\(StepsUploader.shared.pendingCount()) 条（存本地，有通道自动补）")
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(StepsUploader.shared.pendingCount() == 0 ? .secondary : .orange)
+                    .foregroundStyle(StepsUploader.shared.pendingCount() == 0 ? Color.secondary : Color.orange)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Text("预排：\(engine.pendingNotifications) 条" +

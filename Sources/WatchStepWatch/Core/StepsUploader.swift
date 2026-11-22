@@ -276,7 +276,7 @@ final class StepsUploader {
             } else {
                 // 服务器明确回了非 2xx：这是服务器的答复，说明网络已通，
                 // 但这条本身被拒。留在队列里会永远卡住后面，直接丢弃并记录。
-                let text = data.flatMap { String($0, encoding: .utf8) } ?? ""
+                let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
                 self.defaults.set("\(stamp) HTTP\(code) slot\(item.slot) \(text.prefix(80))",
                                   forKey: self.kLastResult)
                 if self.pendingCount() > 0 { self.flush() }

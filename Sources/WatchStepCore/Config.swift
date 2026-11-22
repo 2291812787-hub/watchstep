@@ -3,9 +3,9 @@ import Foundation
 /// 全部可调参数。存 UserDefaults，重装丢失后回到默认值也不会崩。
 struct Config: Codable, Equatable {
     var enabled: Bool = true
-    var targetSteps: Int = 200
+    var targetSteps: Int = 150
     var windowMinutes: Int = 30
-    var tickMinutes: Int = 5
+    var tickMinutes: Int = 3
 
     // MARK: - 生效时段（分钟粒度）
 
@@ -55,7 +55,7 @@ struct Config: Codable, Equatable {
     var pauseOffWrist: Bool = true
 
     /// 电量低于 lowBatteryPercent 时不催，省着点电。
-    var pauseOnLowBattery: Bool = true
+    var pauseOnLowBattery: Bool = false
 
     /// 低电量阈值（百分比）。
     var lowBatteryPercent: Int = 20
