@@ -80,13 +80,22 @@ targets:
         WKBackgroundModes:
           - self-care
         NSMotionUsageDescription: 读取步数，用于判断你这两天有没有走动。
-        # 这里刻意不放 NSAppTransportSecurity 和 NSLocalNetworkUsageDescription。
-        # 2.4(14) 就是没有这两个键、只走 HTTPS 公网，服务器收到了 09:55 / 10:23
-        # 两条（src_ip 127.0.0.1）。后来加 ATS 想放开局域网明文，反而踩坑：
-        # NSAllowsLocalNetworking 一出现，NSAllowsArbitraryLoads 会被系统忽略，
-        # 而 LocalNetworking 只覆盖 .local / 无点主机名，不覆盖 IP 字面量 ——
-        # 等于局域网没放开、公网的通行证还作废了。既然公网 HTTPS 本来就够用，
-        # 就把这两个键都去掉，回到那一版的干净状态。
+        NSLocalNetworkUsageDescription: 需要访问家中局域网里的步数服务器，把每天走的步数传上去。
+        # 【4.15 关键修复】必须声明 NSLocalNetworkUsageDescription。
+        #
+        # 系统弹「允许"催步"查找并连接本地网络上的设备？」的前提，是 App 先
+        # 声明自己要联网。这个键一直缺着，所以系统**从不询问，直接判定无权限**，
+        # 表现就是：路径 unsatisfied、请求 18ms 被弹回 -1004、自检三条齐红。
+        # 这与"用户点了没生效"完全不同 —— 是压根没有那条授权记录。
+        #
+        # 只在全新安装时才会问一次；覆盖安装沿用旧记录，所以旧记录一旦是
+        # "拒/错位"，重装多少次都不会再问。这就是"有时运气好弹一次"的来源。
+        #
+        # 注意：这里**仍然不加** NSAppTransportSecurity / NSAllowsLocalNetworking。
+        # 2.4(14) 踩过的坑：NSAllowsLocalNetworking 一出现，NSAllowsArbitraryLoads
+        # 会被系统忽略，而 LocalNetworking 只覆盖 .local / 无点主机名、不覆盖 IP
+        # 字面量 —— 局域网没放开、公网通行证还作废。公网走 HTTPS 本来就够用，
+        # 所以 ATS 一律不碰；本地网络权限与 ATS 是两件独立的事。
         UIDeviceFamily:
           - 4
     settings:
