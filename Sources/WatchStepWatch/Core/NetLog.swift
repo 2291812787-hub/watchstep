@@ -31,6 +31,32 @@ enum NetLog {
     }
 
     /// 把 NSError 拆成能直接判读的一行。
+    /// 冷启打点：证明 App 起来了，并留下当时的网卡与通知授权状态。
+    static func mark(_ tag: String) {
+        add("=== \(tag) ver=\(ver()) net=\(ifaces())")
+    }
+
+    /// 通知授权状态：没有通知权限的话，催步也就等于没装。
+    static func snapshot() {
+        ifacesUsed = ifaces()
+        UNUserNotificationCenter.current().getNotificationSettings { s in
+            let map: [UNAuthorizationStatus: String] = [
+                .notDetermined: "未询问",
+                .denied: "被拒",
+                .authorized: "允许",
+                .provisional: "临时",
+                .ephemeral: "短暂"
+            ]
+            add("通知授权=\(map[s.authorizationStatus] ?? "未知(\(s.authorizationStatus.rawValue))")")
+        }
+    }
+
+    private static var ifacesUsed = ""
+
+    private static func ver() -> String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
+    }
+
     static func describe(_ tag: String, _ err: Error?) -> String {
         guard let e = err as NSError? else { return "\(tag) ok" }
         var extra = ""
