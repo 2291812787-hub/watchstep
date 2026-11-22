@@ -219,6 +219,7 @@ final class NetGateway {
             self?.lock.lock()
             if let e = err as NSError? { self?.lastCode = e.code } else { self?.lastCode = 0 }
             self?.lock.unlock()
+            NetLog.rec("fetchOnce \(lane) \(req.url?.absoluteString ?? "?") -> " + NetLog.describe(err))
             done(data, resp as? HTTPURLResponse, err)
         }.resume()
     }

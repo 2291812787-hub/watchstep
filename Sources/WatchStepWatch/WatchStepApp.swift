@@ -43,6 +43,8 @@ final class NudgePresenter: NSObject, UNUserNotificationCenterDelegate {
 final class AppDelegate: NSObject, WKApplicationDelegate {
 
     func applicationDidFinishLaunching() {
+        NetLog.mark("LAUNCH")          // 每次冷启先留一条：证明 App 真的起来了
+        NetLog.snapshot()
         NudgePresenter.shared.install()
         WatchEngine.shared.boot()
     }
