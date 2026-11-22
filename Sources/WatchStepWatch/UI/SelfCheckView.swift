@@ -80,7 +80,7 @@ struct SelfCheckView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.orange)
 
-                Text("网关 重连\(NetGateway.shared.rebuildCount)次 · 路径\(NetGateway.shared.lastPath) · 错码\(NetGateway.shared.lastCode)")
+                Text("网关 重连\(NetGateway.shared.rebuildCount())次 · 路径\(NetGateway.shared.lastPath) · 错码\(NetGateway.shared.lastCode)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(NetGateway.shared.lastCode == 0 ? Color.secondary : Color.red)
                     .fixedSize(horizontal: false, vertical: true)
@@ -97,6 +97,11 @@ struct SelfCheckView: View {
                 Text("授权：\(engine.notificationAuth)")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(engine.notificationAuth == "已允许" ? .green : .red)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("待发：\(StepsUploader.shared.pendingCount()) 条（存本地，有通道自动补）")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(StepsUploader.shared.pendingCount() == 0 ? .secondary : .orange)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Text("预排：\(engine.pendingNotifications) 条" +

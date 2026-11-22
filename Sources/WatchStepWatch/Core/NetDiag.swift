@@ -95,7 +95,7 @@ enum NetDiag {
             req.cachePolicy = .reloadIgnoringLocalCacheData
             group.enter()
             let t0 = Date()
-            NetGateway.shared.fetchOnce(req) { _, resp, err in
+            NetGateway.shared.fetchOnce(req, lane: .probe) { _, resp, err in
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
                 var line: String
                 if let h = resp {
@@ -126,8 +126,8 @@ enum NetDiag {
                 finish(ifs: ifs, hits: first, round: 1, completion: completion)
                 return
             }
-            // 换一个新 session 再要一次。
-            NetGateway.shared.rebuild()
+            // 换一条新会话再要一次（只换探针自己的，不碰上传）。
+            NetGateway.shared.rebuild(.probe)
             hits(timeout: hitTimeout) { second in
                 finish(ifs: ifs, hits: second.isEmpty ? first : second,
                        round: 2, completion: completion)
@@ -146,7 +146,7 @@ enum NetDiag {
         } else {
             // 失败也把「已经主动重连过几次」摆出来 —— 不给这个数，
             // 下一次又只能在「是不是网络问题」里打转。
-            lines.append("已主动重连 \(NetGateway.shared.rebuildCount) 次 · 路径 \(NetGateway.shared.lastPath)")
+            lines.append("已主动重连 \(NetGateway.shared.rebuildCount(.probe)) 次 · 路径 \(NetGateway.shared.lastPath)")
         }
         completion(lines)
     }

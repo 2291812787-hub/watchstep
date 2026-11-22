@@ -140,8 +140,86 @@ final class StepsUploader {
         return found
     }
 
+    // MARK: - 待发队列（这次的核心）
+
+    /// 一条待发记录。**先落盘，再发** —— 这是「不丢数据」的唯一保证。
+    ///
+    /// 为什么必须落盘：系统判定路径 unsatisfied 时（用户那台表就是，
+    /// 重连 15 次、路码 -1004），请求根本出不去。如果只在内存里排一次队，
+    /// 进程一被冻住就全没了。写进沙盒文件，App 下次醒来还能接着补。
+    struct Pending: Codable {
+        var key: String      // date#slot
+        var date: String     // yyyy-MM-dd
+        var slot: Int
+        var steps: Int
+        var note: String
+        var sentAt: String
+    }
+
+    private var pendingURL: URL {
+        let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return d.appendingPathComponent("pending_uploads.json")
+    }
+
+    private func loadPending() -> [Pending] {
+        guard let d = try? Data(contentsOf: pendingURL),
+              let a = try? JSONDecoder().decode([Pending].self, from: d) else { return [] }
+        return a
+    }
+
+    private func savePending(_ a: [Pending]) {
+        // 只留最近 48 条（两天），再多也没意义：每条都是当天累计值，
+        // 后一条顶前一条。
+        let trimmed = Array(a.suffix(48))
+        if let d = try? JSONEncoder().encode(trimmed) {
+            try? d.write(to: pendingURL, options: .atomic)
+        }
+    }
+
+    func pendingCount() -> Int { loadPending().count }
+
+    private func enqueue(_ item: Pending) {
+        var a = loadPending()
+        if let i = a.firstIndex(where: { $0.key == item.key }) {
+            // 同一个时点重发：用新的步数覆盖，别叠两条
+            a[i] = item
+        } else {
+            a.append(item)
+        }
+        savePending(a)
+    }
+
     private func post(now: Date, slot: Int, steps: Int, key: String, note: String) {
-        // inFlight 一直保持 true 到回调回来，避免重复发。
+        enqueue(Pending(key: key,
+                        date: Self.dayFmt.string(from: now),
+                        slot: slot,
+                        steps: steps,
+                        note: note,
+                        sentAt: ISO8601DateFormatter().string(from: now)))
+        flush()
+    }
+
+    /// 把队列里的东西尽量发出去。成功一条就顺手发下一条。
+    ///
+    /// 这条链路里没有任何「等系统说可以」的动作：
+    ///   · 请求直接真发（NetGateway 里 waitsForConnectivity = false）
+    ///   · 发不出去就换一条新会话再要，最多两轮，**不刷 15 次**（那是白耗电，
+    ///     实测重连 15 次全被系统回同一个 unsatisfied）
+    ///   · 还不行就留在盘里，等路径变可用的那一刻自己补
+    func flush() {
+        if inFlight {
+            if let t = inFlightAt, Date().timeIntervalSince(t) < 120 { return }
+            inFlight = false
+        }
+        var a = loadPending()
+        guard !a.isEmpty else { return }
+
+        let item = a.removeFirst()
+        savePending(a)
+
+        inFlight = true
+        inFlightAt = Date()
+
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.timeoutInterval = 8
@@ -149,70 +227,70 @@ final class StepsUploader {
         req.setValue(token, forHTTPHeaderField: "X-Watch-Token")
 
         var body: [String: Any] = [
-            "steps": steps,
-            "date": Self.dayFmt.string(from: now),
-            "slot": slot,
+            "steps": item.steps,
+            "date": item.date,
+            "slot": item.slot,
             "device": "watch",
+            "sent_at": item.sentAt,
+            // 补发标记：服务端日志里一眼能看出这条是离线攒下来的
+            "queued": a.count,
         ]
-        if !note.isEmpty { body["note"] = note }
-        body["sent_at"] = ISO8601DateFormatter().string(from: now)
-        // 诊断：把表上主 bundle 的 PlugIns 目录列出来随上报带走。
-        // 表盘复杂功能是 appex，装在 WatchStepWatch.app/PlugIns 下。
-        // iloader 的二进制里没有 "appex" 字样，它很可能不单独签名扩展；
-        // 未签名的扩展系统会拒绝加载 → 表盘那一格渲染不出来。
-        // 这一行能让服务端日志直接回答「appex 到没到表上」，不用靠猜。
+        if !item.note.isEmpty { body["note"] = item.note }
         body["plugins"] = Self.pluginManifest()
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        // **主动重连，而不是等系统放行。**
-        //
-        // 以前是 `Self.session.dataTask` 一次就完事：一次失败，这个时点就废了，
-        // 要等下一个整点才再试 —— 而用户说的「忽然就行」，那个窗口期根本没被抓住。
-        // 现在交给 NetGateway：发不出去就扔掉旧 session、换新的再要，
-        // 退避 0 / 2 / 6 / 15 秒，四次之内撞上「放行的那一刻」就成。
-        // 每一次重试都是一次真实的 socket 建连，这也是让系统「看见」这个 App
-        // 在请求网络的唯一办法。
-        NetGateway.shared.fetch(req, delays: [0, 2, 6, 15]) { [weak self] data, resp, err in
+        NetGateway.shared.fetch(req, lane: .upload, delays: [0, 2, 6]) { [weak self] data, resp, err in
             guard let self = self else { return }
             self.inFlight = false
+            self.inFlightAt = nil
             let code = resp?.statusCode ?? 0
             let stamp = Self.clock.string(from: Date())
+
             if let err = err {
                 let ns = err as NSError
+                // 失败：**放回队首**，一个字节都不丢
+                var back = self.loadPending()
+                back.insert(item, at: 0)
+                self.savePending(back)
                 self.defaults.set(
-                    "\(stamp) 失败 slot\(slot) code\(ns.code) 已重连\(NetGateway.shared.rebuildCount)次 \(err.localizedDescription)",
+                    "\(stamp) 失败 slot\(item.slot) code\(ns.code) 待发\(self.pendingCount())条 重连\(NetGateway.shared.rebuildCount())次",
                     forKey: self.kLastResult)
-                // 网络一恢复就补发，不等下一个整点。这是「被动等超时」和
-                // 「一有许可立刻发」的区别 —— 用户说的就是这个。
+                // 有通道了立刻补，不等下一个整点。
                 NetGateway.whenUsable { [weak self] in
                     guard let self = self else { return }
                     self.forceNext = true
-                    self.tickIfNeeded(now: Date())
+                    self.flush()
                 }
                 return
             }
+
             if code == 200 || code == 201 {
-                self.defaults.set(key, forKey: self.kLastSent)
+                self.defaults.set(item.key, forKey: self.kLastSent)
                 self.defaults.set(0, forKey: self.kSlotTries)
                 self.defaults.set(Date(), forKey: self.kLastOK)
-                self.defaults.set(steps, forKey: self.kLastSteps)
-                self.defaults.set("\(stamp) 成功 slot\(slot) \(steps)步",
+                self.defaults.set(item.steps, forKey: self.kLastSteps)
+                self.defaults.set("\(stamp) 成功 slot\(item.slot) \(item.steps)步 剩余\(self.pendingCount())条",
                                   forKey: self.kLastResult)
+                // 队列没清空就接着发
+                if self.pendingCount() > 0 { self.flush() }
             } else {
-                let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                self.defaults.set("\(stamp) HTTP\(code) slot\(slot) \(text.prefix(80))",
+                // 服务器明确回了非 2xx：这是服务器的答复，说明网络已通，
+                // 但这条本身被拒。留在队列里会永远卡住后面，直接丢弃并记录。
+                let text = data.flatMap { String($0, encoding: .utf8) } ?? ""
+                self.defaults.set("\(stamp) HTTP\(code) slot\(item.slot) \(text.prefix(80))",
                                   forKey: self.kLastResult)
+                if self.pendingCount() > 0 { self.flush() }
             }
         }
     }
 
     /// 自检页「强制重连」：立刻扔掉可能已经中毒的 session，并立刻补发一次。
     func forceReconnect() {
-        NetGateway.shared.rebuild()
+        NetGateway.shared.rebuild(.upload)
         forceNext = true
         inFlight = false
         inFlightAt = nil
-        tickIfNeeded(now: Date())
+        flush()
     }
 
     // MARK: - 自检

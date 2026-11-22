@@ -5,7 +5,7 @@ import Network
 
 /// 主动联网网关 —— 把「被动等系统允许」换成「先真发，失败了主动重连再发」。
 ///
-/// ## 为什么必须这么改
+/// ## 为什么要这么改（4.13 及以前的根因）
 ///
 /// `URLSessionConfiguration.waitsForConnectivity = true` 的语义是：
 /// **不自己建连，先挂着，等系统通知路径可用再发。**
@@ -18,55 +18,68 @@ import Network
 ///        → 它永远在等路径就绪
 ///        → 请求一直 pending，直到 timeoutIntervalForResource 到点
 ///
-/// 表现完全能对上用户看到的现象：
-///   · 所有请求在**同一个毫秒数**上失败（15000ms / 30000ms 一模一样），
-///     说明它们根本没发出去，只是在同一个等待终点一起超时；
-///   · 失败码固定 -1001，不是 -1004（连不上）也不是 -1009（未联网）；
-///   · 手表明明有 IP（en0 = 192.168.x），换 Wi-Fi、换 5G 都一样 ——
-///     因为它压根没在请求网络，它在等一个只有「先请求」才会出现的许可；
-///   · 偶尔「忽然就好了」，是别的进程或系统唤醒顺带把路径点亮了，
-///     那一次请求被放行。这就是用户说的「有时候行，大部分时候不行」。
+/// 4.13 的表现完全对得上：三条自检全部 -1001、耗时同一个 15046ms
+/// （= resource 15 秒），失败码不是 -1004 也不是 -1009；en0 有 192.168.x
+/// 地址；上传自 18:02:58 起零请求。请求根本没发出去，只是在同一个
+/// 等待终点一起超时。偶尔「忽然就好了」是别的进程顺带点亮了路径。
 ///
-/// 所以这里反过来做：
-///   1. `waitsForConnectivity = false` —— 立刻真发，让系统看见；
-///   2. 超时压到 8 秒，失败得快，不占用 App 的唤醒时间；
-///   3. 失败就 `invalidateAndCancel` 掉整个 session（连它缓存的那份
-///      「路径不可用」判断一起扔掉），换一个全新的 session 再发 ——
-///      新 session 会重新评估路径，等于主动再要一次；
-///   4. 常驻一个 `NWPathMonitor`，路径一变成可用就立刻补发，
-///      不用等到下一次整点或下一次超时；
-///   5. 三条网络通道全部显式放开：Wi-Fi、蜂窝、昂贵/受限网络
-///      （低电量模式、漫游、热点），不依赖默认值。
+/// ## 4.14 第一版踩的坑（-999 / 18ms）
 ///
-/// 面板上要能看见「重连了几次」，否则又变成猜。
+/// 上传和诊断共用同一个 session，任何一方失败就 `invalidateAndCancel`
+/// 整条会话 —— 把另一方**正在飞**的请求一起砍了，立刻返回 -999
+/// （NSURLErrorCancelled），耗时只有十几毫秒。诊断页三条同时 -999 就是
+/// 被上传那边的重建误杀。
+///
+/// 所以现在：
+///   · 上传和探针各走各的通道（`Lane`），互不 cancel；
+///   · 重建用 `finishTasksAndInvalidate()`，让在飞的请求跑完再退休，
+///     绝不把并发请求变成假的 -999；
+///   · 只有「路径刚变可用」这种真正需要立刻补发的场景，才由监听触发。
 final class NetGateway {
 
     static let shared = NetGateway()
 
-    private let lock = NSLock()
-    private var session: URLSession
-    private var generation = 0
-    private var monitors: [NWPathMonitor] = []
+    /// 两条互不干扰的通道。上传被重建不该影响诊断，反之亦然。
+    enum Lane: Hashable {
+        /// 步数上报。失败要重试，重试要能换 session。
+        case upload
+        /// 自检探针。用户手动点的诊断，绝不能被后台的续传打断。
+        case probe
+    }
 
-    /// 自检页显示用：这次进程里一共主动重建了几次 session。
-    private(set) var rebuildCount = 0
+    private let lock = NSLock()
+    private var sessions: [Lane: URLSession] = [:]
+    private var generation: [Lane: Int] = [:]
+    private var monitors: [Lane: NWPathMonitor] = [:]
+    private var rebuilds: [Lane: Int] = [:]
+
+    /// 自检页显示用：这一路一共主动重建了几次 session。
+    func rebuildCount(_ lane: Lane = .upload) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return rebuilds[lane] ?? 0
+    }
+
     /// 最近一次失败的 NSURLError code（0 = 最近一次没失败）。
     private(set) var lastCode = 0
     /// 路径监听看到的最后状态，只作参考，不当判据（watchOS 上它经常骗人）。
     private(set) var lastPath = "未启动"
 
     private init() {
-        session = Self.make()
-        // 一启动就挂一路监听：路径从「不就绪」跳到「就绪」的那一刻，
+        for lane in [Lane.upload, Lane.probe] {
+            sessions[lane] = Self.make()
+            generation[lane] = 0
+            rebuilds[lane] = 0
+        }
+        // 一启动就挂监听：路径从「不就绪」跳到「就绪」的那一刻，
         // 就是用户说的「忽然允许了」，要能立刻补发，而不是等下一个整点。
-        startMonitor(0)
+        startMonitor(.upload)
     }
 
     private static func make() -> URLSession {
         let c = URLSessionConfiguration.ephemeral
         // 核心那一行：不被动等。
         c.waitsForConnectivity = false
-        // 快失败。真正的重试由下面的 fetch 负责，而不是让一个请求干挂 30 秒。
+        // 快失败。真正的重试由 fetch 负责，而不是让一个请求干挂 30 秒。
         c.timeoutIntervalForRequest = 8
         c.timeoutIntervalForResource = 12
         // 三条通道全开：Wi-Fi、蜂窝、昂贵/受限网络。
@@ -79,25 +92,29 @@ final class NetGateway {
         return URLSession(configuration: c)
     }
 
-    func current() -> URLSession {
+    func current(_ lane: Lane = .upload) -> URLSession {
         lock.lock(); defer { lock.unlock() }
-        return session
+        return sessions[lane] ?? Self.make()
     }
 
-    /// 主动重连：扔掉旧 session（连同它记住的「路径不可用」），换新的，再挂一路监听。
+    /// 主动重连：换一条新会话（重新评估路径 = 再向系统要一次），旧的处理完自然退休。
+    ///
+    /// **不用 invalidateAndCancel。** 那是 4.14 第一版把诊断误杀成 -999 的原因：
+    /// 它会把这条通道上所有正在飞的请求立刻取消。`finishTasksAndInvalidate()`
+    /// 只拒绝新任务，在飞的跑完或超时，语义正好。
     @discardableResult
-    func rebuild() -> URLSession {
+    func rebuild(_ lane: Lane = .upload) -> URLSession {
         lock.lock()
-        let old = session
-        session = Self.make()
-        generation += 1
-        rebuildCount += 1
-        let g = generation
+        let old = sessions[lane]
+        sessions[lane] = Self.make()
+        generation[lane, default: 0] += 1
+        rebuilds[lane, default: 0] += 1
+        let g = generation[lane] ?? 0
         lock.unlock()
 
-        old.invalidateAndCancel()
-        startMonitor(g)
-        return current()
+        old?.finishTasksAndInvalidate()
+        if lane == .upload { startMonitor(lane) }
+        return current(lane)
     }
 
     /// 路径监听。只听「变可用了」，把它当补发扳机，不当判据。
@@ -105,21 +122,21 @@ final class NetGateway {
     /// watchOS 上它会报「断(无网卡)」，而同一时刻三个目标全 200 —— 这个信号
     /// 本身不可信。但它从「不就绪」跳到「就绪」的**那一刻**是有用的：
     /// 那正好就是用户说的「忽然允许了」，抓住它比等超时强。
-    private func startMonitor(_ g: Int) {
+    private func startMonitor(_ lane: Lane) {
         #if canImport(Network)
         lock.lock()
-        monitors.forEach { $0.cancel() }
-        monitors.removeAll()
+        monitors[lane]?.cancel()
         let m = NWPathMonitor()
-        monitors.append(m)
+        monitors[lane] = m
+        let g = generation[lane] ?? 0
         lock.unlock()
 
         m.pathUpdateHandler = { [weak self] path in
             guard let self = self else { return }
             self.lock.lock()
-            let cur = self.generation
+            let cur = self.generation[lane] ?? 0
             self.lock.unlock()
-            // 只认当前这一代 session 的监听，旧的直接丢。
+            // 只认当前这一代监听的结论，旧的直接丢。
             guard cur == g else { return }
 
             let usable = (path.status == .satisfied)
@@ -128,7 +145,7 @@ final class NetGateway {
                 DispatchQueue.main.async { NetGateway.notifyUsable() }
             }
         }
-        m.start(queue: DispatchQueue(label: "netgw.path.\(g)"))
+        m.start(queue: DispatchQueue(label: "netgw.path.\(lane.hashValue).\(g)"))
         #else
         lastPath = "无 Network 框架"
         #endif
@@ -157,28 +174,27 @@ final class NetGateway {
     // MARK: - 请求
 
     /// 打一次，不重试。给需要自己控制节奏的调用方（自检的三目标并行）。
-    func fetchOnce(_ req: URLRequest, done: @escaping (Data?, HTTPURLResponse?, Error?) -> Void) {
-        current().dataTask(with: req) { [weak self] data, resp, err in
-            if let e = err as NSError? {
-                self?.lock.lock(); self?.lastCode = e.code; self?.lock.unlock()
-            } else {
-                self?.lock.lock(); self?.lastCode = 0; self?.lock.unlock()
-            }
+    func fetchOnce(_ req: URLRequest, lane: Lane = .upload,
+                   done: @escaping (Data?, HTTPURLResponse?, Error?) -> Void) {
+        current(lane).dataTask(with: req) { [weak self] data, resp, err in
+            self?.lock.lock()
+            if let e = err as NSError? { self?.lastCode = e.code } else { self?.lastCode = 0 }
+            self?.lock.unlock()
             done(data, resp as? HTTPURLResponse, err)
         }.resume()
     }
 
-    /// 主动重试：每次失败都换一个新 session 再打。
+    /// 主动重试：每次失败都换一条新会话再打。
     ///
-    /// `delays` 的第一项是第一次尝试前的等待（通常 0）。每一项之后都重建 session ——
-    /// 重建不是为了「刷新连接」，是为了**扔掉那个已经判定路径不可用的 session**，
+    /// `delays` 的第一项是第一次尝试前的等待（通常 0）。每次失败都重建 ——
+    /// 重建不是为了「刷新连接」，是为了**扔掉那个已经判定路径不可用的会话**，
     /// 让系统重新走一遍网络分配。这是「主动要」和「被动等」的全部区别。
-    func fetch(_ req: URLRequest,
+    func fetch(_ req: URLRequest, lane: Lane = .upload,
                delays: [Double] = [0, 1.5, 4, 10],
                done: @escaping (Data?, HTTPURLResponse?, Error?) -> Void) {
         var queue = delays
         guard !queue.isEmpty else {
-            fetchOnce(req, done: done)
+            fetchOnce(req, lane: lane, done: done)
             return
         }
         let wait = queue.removeFirst()
@@ -186,7 +202,7 @@ final class NetGateway {
 
         let run = { [weak self] in
             guard let self = self else { return }
-            self.fetchOnce(req) { data, resp, err in
+            self.fetchOnce(req, lane: lane) { data, resp, err in
                 // 只要拿到了 HTTP 响应就算通，哪怕 401/500 —— 那是服务器在说话，
                 // 说明网络这一层已经成立，再重连没有意义。
                 if resp != nil || err == nil {
@@ -197,8 +213,8 @@ final class NetGateway {
                     done(data, resp, err)
                     return
                 }
-                self.rebuild()
-                self.fetch(Self.rebuilt(req), delays: remaining, done: done)
+                self.rebuild(lane)
+                self.fetch(req, lane: lane, delays: remaining, done: done)
             }
         }
 
@@ -208,7 +224,4 @@ final class NetGateway {
             DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: run)
         }
     }
-
-    /// 重建后的请求原样返回（URLRequest 是值类型，重发安全）。
-    private static func rebuilt(_ r: URLRequest) -> URLRequest { r }
 }
