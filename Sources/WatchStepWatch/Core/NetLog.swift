@@ -30,7 +30,7 @@ enum NetLog {
         UNUserNotificationCenter.current().getNotificationSettings { s in
             let m: [UNAuthorizationStatus: String] = [
                 .notDetermined: "未询问", .denied: "已拒绝",
-                .authorized: "已允许", .provisional: "临时", .ephemeral: "临时ephemeral"
+                .authorized: "已允许", .provisional: "临时"
             ]
             rec("通知授权=\(m[s.authorizationStatus] ?? "未知\(s.authorizationStatus.rawValue)")")
         }
