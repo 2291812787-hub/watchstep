@@ -20,22 +20,11 @@ final class StepsUploader {
     private let endpoint = URL(string: "https://watch.webchangming.top/steps")!
     private let token = "c7bb1f13a7b29c53e81836d66a6afded"
 
-    /// 专用 session：**必须** waitsForConnectivity = true。
-    ///
-    /// 这台手表的路径状态会波动：NWPathMonitor 经常报「无网卡」，但同一时刻
-    /// 实测三个目标全 200（3.1 的截图就是这样）。把 waitsForConnectivity 关掉后，
-    /// 一旦路径被判未就绪，请求立刻被拒，表现为 150ms 就返回 -1004，连
-    /// captive.apple.com 都连不上 —— 看起来像"全断"，其实网络是好的，只是没人等。
-    ///
-    /// 之前那个 38.9 秒挂死是另一回事：等路径期间 timeoutIntervalForRequest
-    /// 不生效，必须靠 timeoutIntervalForResource 兜底。所以两个都设。
-    static let session: URLSession = {
-        let c = URLSessionConfiguration.ephemeral
-        c.waitsForConnectivity = true
-        c.timeoutIntervalForRequest = 20
-        c.timeoutIntervalForResource = 30
-        return URLSession(configuration: c)
-    }()
+    /// **不再用 waitsForConnectivity = true。** 统一走 NetGateway：
+    /// 先真发，失败就换新 session 再要一次，路径一变可用立刻补发。
+    /// 那段「必须 waitsForConnectivity = true」的旧注释是错的，见 NetGateway.swift
+    /// 开头：等路径会让请求根本不发出去，系统因此不分配网络能力，形成死锁。
+    static var session: URLSession { NetGateway.shared.current() }
 
     /// 每天推送的时点（本地时区）
     /// 8:00–23:00 每小时整点，末尾补 23:30。
@@ -55,9 +44,15 @@ final class StepsUploader {
     private let kLastResult = "upload.lastResult"
     private let kLastOK = "upload.lastOKAt"
     private let kLastSteps = "upload.lastSteps"
+    /// 这个时点已经试过几次。退避分级靠它，成功即清零。
+    private let kSlotTries = "upload.slotTries"
 
     private let defaults = UserDefaults.standard
     private var inFlight = false
+
+    /// 路径刚变为可用时置真，让下一次 tickIfNeeded 跳过退避直接发。
+    /// 用户说的「忽然就能连了」，那一下必须立刻抓住，不能被 60 秒退避挡掉。
+    private var forceNext = false
 
     /// 起飞时刻。请求挂住时（watchOS 随时可能把进程冻住，回调永远不来）
     /// inFlight 会永远是 true，于是之后每次 tick 都在闸门前 return，再也不重试。
@@ -88,20 +83,34 @@ final class StepsUploader {
         let key = "\(Self.dayFmt.string(from: now))#\(slot)"
         if defaults.string(forKey: kLastSent) == key { return }
         if inFlight {
-            if let t = inFlightAt, now.timeIntervalSince(t) < 45 { return }
+            if let t = inFlightAt, now.timeIntervalSince(t) < 120 { return }
             // 挂太久了，当它已经死了
             inFlight = false
         }
 
-        // 同一个点失败后退避 60 秒，别把每次 tick 都拿去撞网络
-        if defaults.string(forKey: kLastSlotAttempt) == key,
-           let last = defaults.object(forKey: kLastAttempt) as? Date,
-           now.timeIntervalSince(last) < 60 {
-            return
+        // 同一个点失败后退避。
+        //
+        // 60 秒那版太粗：路径可能在几秒后就放行，而它要等到 60 秒后才有机会再试。
+        // 现在按「这个时点已经试过几次」分级：第一次失败 15 秒后再试，
+        // 第二次 45 秒，第三次 120 秒，之后 300 秒 —— 越往后退越省电，
+        // 但一开始绝不错过那个刚刚好的窗口。
+        // forceNext 是「路径刚变可用」打的标记，直接穿透，不受退避限制。
+        if !forceNext,
+           defaults.string(forKey: kLastSlotAttempt) == key,
+           let last = defaults.object(forKey: kLastAttempt) as? Date {
+            let n = defaults.integer(forKey: kSlotTries)
+            let gap: TimeInterval = n <= 1 ? 15 : (n == 2 ? 45 : (n == 3 ? 120 : 300))
+            if now.timeIntervalSince(last) < gap { return }
         }
+        forceNext = false
 
         inFlight = true
         inFlightAt = now
+        if defaults.string(forKey: kLastSlotAttempt) != key {
+            // 换了一个时点，计数重来
+            defaults.set(0, forKey: kSlotTries)
+        }
+        defaults.set(defaults.integer(forKey: kSlotTries) + 1, forKey: kSlotTries)
         defaults.set(key, forKey: kLastSlotAttempt)
         defaults.set(now, forKey: kLastAttempt)
 
@@ -135,7 +144,7 @@ final class StepsUploader {
         // inFlight 一直保持 true 到回调回来，避免重复发。
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
-        req.timeoutInterval = 20
+        req.timeoutInterval = 8
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(token, forHTTPHeaderField: "X-Watch-Token")
 
@@ -155,19 +164,36 @@ final class StepsUploader {
         body["plugins"] = Self.pluginManifest()
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        Self.session.dataTask(with: req) { [weak self] data, resp, err in
+        // **主动重连，而不是等系统放行。**
+        //
+        // 以前是 `Self.session.dataTask` 一次就完事：一次失败，这个时点就废了，
+        // 要等下一个整点才再试 —— 而用户说的「忽然就行」，那个窗口期根本没被抓住。
+        // 现在交给 NetGateway：发不出去就扔掉旧 session、换新的再要，
+        // 退避 0 / 2 / 6 / 15 秒，四次之内撞上「放行的那一刻」就成。
+        // 每一次重试都是一次真实的 socket 建连，这也是让系统「看见」这个 App
+        // 在请求网络的唯一办法。
+        NetGateway.shared.fetch(req, delays: [0, 2, 6, 15]) { [weak self] data, resp, err in
             guard let self = self else { return }
             self.inFlight = false
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let code = resp?.statusCode ?? 0
             let stamp = Self.clock.string(from: Date())
             if let err = err {
                 let ns = err as NSError
-                self.defaults.set("\(stamp) 失败 slot\(slot) code\(ns.code) \(err.localizedDescription)",
-                                  forKey: self.kLastResult)
+                self.defaults.set(
+                    "\(stamp) 失败 slot\(slot) code\(ns.code) 已重连\(NetGateway.shared.rebuildCount)次 \(err.localizedDescription)",
+                    forKey: self.kLastResult)
+                // 网络一恢复就补发，不等下一个整点。这是「被动等超时」和
+                // 「一有许可立刻发」的区别 —— 用户说的就是这个。
+                NetGateway.whenUsable { [weak self] in
+                    guard let self = self else { return }
+                    self.forceNext = true
+                    self.tickIfNeeded(now: Date())
+                }
                 return
             }
             if code == 200 || code == 201 {
                 self.defaults.set(key, forKey: self.kLastSent)
+                self.defaults.set(0, forKey: self.kSlotTries)
                 self.defaults.set(Date(), forKey: self.kLastOK)
                 self.defaults.set(steps, forKey: self.kLastSteps)
                 self.defaults.set("\(stamp) 成功 slot\(slot) \(steps)步",
@@ -177,7 +203,16 @@ final class StepsUploader {
                 self.defaults.set("\(stamp) HTTP\(code) slot\(slot) \(text.prefix(80))",
                                   forKey: self.kLastResult)
             }
-        }.resume()
+        }
+    }
+
+    /// 自检页「强制重连」：立刻扔掉可能已经中毒的 session，并立刻补发一次。
+    func forceReconnect() {
+        NetGateway.shared.rebuild()
+        forceNext = true
+        inFlight = false
+        inFlightAt = nil
+        tickIfNeeded(now: Date())
     }
 
     // MARK: - 自检

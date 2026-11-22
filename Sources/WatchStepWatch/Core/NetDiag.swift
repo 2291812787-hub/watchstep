@@ -67,33 +67,23 @@ enum NetDiag {
         return parts.isEmpty ? "接口 无IPv4" : "接口 " + parts.joined(separator: " ")
     }
 
-    /// 探测必须等路径，不能快速失败。
-    ///
-    /// 血泪教训：watchOS 上 NWPathMonitor 会报「断(无网卡)」，哪怕 en0 明明有
-    /// 192.168.31.x 的 IP、三个目标全 200 —— 这个信号不可信。而
-    /// waitsForConnectivity = false 时，CFNetwork 就按这个不可信的路径判定
-    /// 当场拒绝，表现为三个目标一起在 150ms 左右返回 -1004（连苹果都一样）。
-    ///
-    /// 所以这里改成等路径：网络其实是通的，等一下就能连上。
-    /// 用 timeoutIntervalForResource 兜底等待时长，避免挂死太久。
-    static let probeSession: URLSession = {
-        let c = URLSessionConfiguration.ephemeral
-        c.waitsForConnectivity = true
-        c.timeoutIntervalForRequest = 8
-        c.timeoutIntervalForResource = 15
-        c.allowsExpensiveNetworkAccess = true
-        c.allowsConstrainedNetworkAccess = true
-        c.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: c)
-    }()
+    /// 三个目标。谁先回来都算，这才是唯一可信的判据。
+    static let targets: [(String, String)] = [
+        ("局域", "http://192.168.31.82:8085/health"),
+        ("公网", "https://watch.webchangming.top/health"),
+        ("苹果", "https://captive.apple.com/hotspot-detect.html"),
+    ]
 
-    /// 三个目标一起打，谁先回来都算。这才是唯一可信的判据。
+    /// 一轮并行探测。**不等路径。**
+    ///
+    /// 这里原来是 `waitsForConnectivity = true`，理由是「等一等网络就通了」。
+    /// 那是错的，而且是这次故障的根源：等路径的请求**根本不会发出去**，
+    /// 系统因此看不到这个 App 在请求网络，也就不会给它分配网络能力 ——
+    /// 于是路径更不可能就绪。等待本身制造了它在等的东西。
+    ///
+    /// 现在改成真发 + 快失败（8 秒）。失败不是坏事，失败才会拿到真实错误码，
+    /// 也才会触发下面 round() 里的「换一个新 session 再要一次」。
     static func hits(timeout: Double, completion: @escaping ([String]) -> Void) {
-        let targets: [(String, String)] = [
-            ("局域", "http://192.168.31.82:8085/health"),
-            ("公网", "https://watch.webchangming.top/health"),
-            ("苹果", "https://captive.apple.com/hotspot-detect.html"),
-        ]
         var out = [String](repeating: "", count: targets.count)
         let lock = NSLock()
         let group = DispatchGroup()
@@ -105,35 +95,59 @@ enum NetDiag {
             req.cachePolicy = .reloadIgnoringLocalCacheData
             group.enter()
             let t0 = Date()
-            probeSession.dataTask(with: req) { _, resp, err in
+            NetGateway.shared.fetchOnce(req) { _, resp, err in
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
                 var line: String
-                if let e = err as NSError? {
-                    line = "\(t.0) ✗\(e.code)\(posixNote(e)) \(ms)ms"
-                } else if let h = resp as? HTTPURLResponse {
+                if let h = resp {
                     line = "\(t.0) \(h.statusCode) \(ms)ms"
+                } else if let e = err as NSError? {
+                    line = "\(t.0) ✗\(e.code)\(posixNote(e)) \(ms)ms"
                 } else {
                     line = "\(t.0) ? \(ms)ms"
                 }
                 lock.lock(); out[i] = line; lock.unlock()
                 group.leave()
-            }.resume()
+            }
         }
 
         group.notify(queue: .main) { completion(out.filter { !$0.isEmpty }) }
     }
 
-    /// 完整一轮：接口清单 + 三个目标实测。
-    static func run(hitTimeout: Double = 10, completion: @escaping ([String]) -> Void) {
+    /// 完整一轮：接口清单 + 实测。全失败就**主动重连一次再打一轮**。
+    ///
+    /// 两轮的意义：第一轮告诉系统「这个 App 在联网」，第二轮是在换掉那份
+    /// 已经判定路径不可用的 session 之后重新要。用户点一次「测网络」，
+    /// 实际发生了两次主动请求 + 一次重建，而不是干等 15 秒渲染三行红叉。
+    static func run(hitTimeout: Double = 8, completion: @escaping ([String]) -> Void) {
         let ifs = interfaces()
-        hits(timeout: hitTimeout) { hl in
-            var lines = [ifs]
-            lines.append(contentsOf: hl)
-            // 三条全绿就别再让人担心了，直接给个结论，省得又盯着中间状态瞎猜。
-            if hl.count >= 3 && hl.allSatisfy({ !$0.contains("✗") }) {
-                lines.append("结论 网络正常")
+        hits(timeout: hitTimeout) { first in
+            let allBad = !first.isEmpty && first.allSatisfy { $0.contains("✗") }
+            guard allBad else {
+                finish(ifs: ifs, hits: first, round: 1, completion: completion)
+                return
             }
-            completion(lines)
+            // 换一个新 session 再要一次。
+            NetGateway.shared.rebuild()
+            hits(timeout: hitTimeout) { second in
+                finish(ifs: ifs, hits: second.isEmpty ? first : second,
+                       round: 2, completion: completion)
+            }
         }
+    }
+
+    private static func finish(ifs: String, hits hl: [String], round: Int,
+                               completion: @escaping ([String]) -> Void) {
+        var lines = [ifs]
+        lines.append(contentsOf: hl)
+        let ok = hl.count >= 3 && hl.allSatisfy { !$0.contains("✗") }
+        if ok {
+            // 三条全绿就别再让人担心了，直接给个结论。
+            lines.append("结论 网络正常" + (round > 1 ? "（第 \(round) 轮主动重连后才通）" : ""))
+        } else {
+            // 失败也把「已经主动重连过几次」摆出来 —— 不给这个数，
+            // 下一次又只能在「是不是网络问题」里打转。
+            lines.append("已主动重连 \(NetGateway.shared.rebuildCount) 次 · 路径 \(NetGateway.shared.lastPath)")
+        }
+        completion(lines)
     }
 }

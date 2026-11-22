@@ -65,11 +65,25 @@ struct SelfCheckView: View {
                 }
 
                 Button("测网络") {
-                    netLines = ["测…"]
+                    netLines = ["测…（第一轮真发，失败会自动重连再打一轮）"]
                     NetDiag.run { lines in netLines = lines }
                 }
                 .font(.system(size: 11))
                 .foregroundStyle(.green)
+
+                // 主动重连：不等系统放行，自己扔掉旧 session 要一次。
+                Button("强制重连并上传") {
+                    netLines = ["重连中…"]
+                    StepsUploader.shared.forceReconnect()
+                    NetDiag.run { lines in netLines = lines }
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+
+                Text("网关 重连\(NetGateway.shared.rebuildCount)次 · 路径\(NetGateway.shared.lastPath) · 错码\(NetGateway.shared.lastCode)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(NetGateway.shared.lastCode == 0 ? .secondary : .red)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Button("测试上传通道") {
                     StepsUploader.shared.probe { _ in engine.runSelfCheck() }
