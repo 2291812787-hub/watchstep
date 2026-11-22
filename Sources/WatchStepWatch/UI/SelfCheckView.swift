@@ -82,7 +82,7 @@ struct SelfCheckView: View {
 
                 Text("网关 重连\(NetGateway.shared.rebuildCount)次 · 路径\(NetGateway.shared.lastPath) · 错码\(NetGateway.shared.lastCode)")
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(NetGateway.shared.lastCode == 0 ? .secondary : .red)
+                    .foregroundStyle(NetGateway.shared.lastCode == 0 ? Color.secondary : Color.red)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Button("测试上传通道") {
