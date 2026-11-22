@@ -18,8 +18,8 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "4.15"
-    CURRENT_PROJECT_VERSION: "45"
+    MARKETING_VERSION: "4.16"
+    CURRENT_PROJECT_VERSION: "46"
     SWIFT_VERSION: "5.0"
     # 自签路线：手动签名，不自动要描述文件
     CODE_SIGN_STYLE: Manual

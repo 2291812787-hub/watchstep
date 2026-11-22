@@ -75,9 +75,48 @@ final class NetGateway {
         startMonitor(.upload)
     }
 
+    /// 第二档：耐心会话。`waitsForConnectivity = true`。
+    ///
+    /// 4.14 我把这一档整个删了，是错的。watchOS 上 NWPath 的判定会卡住，
+    /// 这时候「当场拒绝」(-1004, 十几毫秒) 和「等一等」(-1001, 等到超时)
+    /// 是同一件事的两种表现，而历史经验是：等一等的那次偶尔真能等到。
+    /// 所以两档都要，快档先给一个立即答案，快档全灭再让耐心档试一次。
+    private var patientSessions: [Lane: URLSession] = [:]
+
+    private static func makePatient() -> URLSession {
+        let c = URLSessionConfiguration.ephemeral
+        c.waitsForConnectivity = true
+        c.timeoutIntervalForRequest = 10
+        c.timeoutIntervalForResource = 10
+        c.allowsCellularAccess = true
+        c.allowsExpensiveNetworkAccess = true
+        c.allowsConstrainedNetworkAccess = true
+        c.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: c)
+    }
+
+    func patient(_ lane: Lane = .upload) -> URLSession {
+        lock.lock(); defer { lock.unlock() }
+        if let s = patientSessions[lane] { return s }
+        let s = Self.makePatient()
+        patientSessions[lane] = s
+        return s
+    }
+
+    /// 耐心打一次（会等系统放行，最多 10 秒）。
+    func patientOnce(_ req: URLRequest, lane: Lane = .upload,
+                     done: @escaping (Data?, HTTPURLResponse?, Error?) -> Void) {
+        patient(lane).dataTask(with: req) { [weak self] data, resp, err in
+            self?.lock.lock()
+            if let e = err as NSError? { self?.lastCode = e.code } else { self?.lastCode = 0 }
+            self?.lock.unlock()
+            done(data, resp as? HTTPURLResponse, err)
+        }.resume()
+    }
+
     private static func make() -> URLSession {
         let c = URLSessionConfiguration.ephemeral
-        // 核心那一行：不被动等。
+        // 快档：不被动等，先要一个立刻的答案。
         c.waitsForConnectivity = false
         // 快失败。真正的重试由 fetch 负责，而不是让一个请求干挂 30 秒。
         c.timeoutIntervalForRequest = 8
@@ -210,7 +249,11 @@ final class NetGateway {
                     return
                 }
                 if remaining.isEmpty {
-                    done(data, resp, err)
+                    // 快档全败 —— 打一次耐心档。watchOS 的路径判定经常报「未就绪」，
+                    // 而 waitsForConnectivity=true 时的等待恰好能跨过这段假警报。
+                    // 4.12 就是这么工作的；4.14 我把它删了，等于把唯一能过假警报的路堵死。
+                    self.rebuild(lane)
+                    self.patientOnce(req, lane: lane, done: done)
                     return
                 }
                 self.rebuild(lane)

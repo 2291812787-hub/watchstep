@@ -83,7 +83,7 @@ enum NetDiag {
     ///
     /// 现在改成真发 + 快失败（8 秒）。失败不是坏事，失败才会拿到真实错误码，
     /// 也才会触发下面 round() 里的「换一个新 session 再要一次」。
-    static func hits(timeout: Double, completion: @escaping ([String]) -> Void) {
+    static func hits(timeout: Double, patient: Bool = false, completion: @escaping ([String]) -> Void) {
         var out = [String](repeating: "", count: targets.count)
         let lock = NSLock()
         let group = DispatchGroup()
@@ -95,7 +95,7 @@ enum NetDiag {
             req.cachePolicy = .reloadIgnoringLocalCacheData
             group.enter()
             let t0 = Date()
-            NetGateway.shared.fetchOnce(req, lane: .probe) { _, resp, err in
+            let cb: (Data?, HTTPURLResponse?, Error?) -> Void = { _, resp, err in
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
                 var line: String
                 if let h = resp {
@@ -107,6 +107,11 @@ enum NetDiag {
                 }
                 lock.lock(); out[i] = line; lock.unlock()
                 group.leave()
+            }
+            if patient {
+                NetGateway.shared.fetch(req, lane: .probe) { d, r, e in cb(d, r, e) }
+            } else {
+                NetGateway.shared.fetchOnce(req, lane: .probe, done: cb)
             }
         }
 
@@ -129,8 +134,18 @@ enum NetDiag {
             // 换一条新会话再要一次（只换探针自己的，不碰上传）。
             NetGateway.shared.rebuild(.probe)
             hits(timeout: hitTimeout) { second in
-                finish(ifs: ifs, hits: second.isEmpty ? first : second,
-                       round: 2, completion: completion)
+                let stillBad = !second.isEmpty && second.allSatisfy { $0.contains("✗") }
+                guard stillBad else {
+                    finish(ifs: ifs, hits: second.isEmpty ? first : second,
+                           round: 2, completion: completion)
+                    return
+                }
+                // 第三轮：耐心档。watchOS 的路径判定会假报「未就绪」，
+                // 只有在 waitsForConnectivity=true 下等一会儿才能越过它。
+                hits(timeout: 10, patient: true) { third in
+                    finish(ifs: ifs, hits: third.isEmpty ? second : third,
+                           round: 3, completion: completion)
+                }
             }
         }
     }
