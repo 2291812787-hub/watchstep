@@ -72,6 +72,11 @@ final class NotificationPlanner {
     /// 最近一次真正送出去的时刻（链上某条，或 app 活着时立刻弹的那条）。
     private(set) var lastDeliveredAt: Date?
 
+    /// 最近一次 `add` 失败的原因。自检页直接显示这一行 ——
+    /// 「有震动没弹窗」是不是因为 add 被系统拒了（超出限流、通知权限被收、
+    /// 内容非法），看这里一眼就知道，不用再猜。
+    var lastFireError: String?
+
     var nextFireAt: Date? { chain.first?.fireAt }
     var chainCount: Int { chain.count }
 
@@ -150,9 +155,24 @@ final class NotificationPlanner {
             }
             if sameTimes {
                 // 时刻没变，但正文里带着步数和坐着的分钟数 —— 那才是用户看的东西。
-                // 正文一致就真没事可做，一致不了就得换（1 分钟最多换一次）。
+                // 正文一致就真没事可做，一致不了就得换。
+                //
+                // **但 58 秒这道闸门只该管远处的槽位，不该管马上要弹的那条。**
+                // 现在是 62 条正文一起重写（远处那些重写毫无意义，它们变成链首时
+                // 自然会被重写），所以必须节流省电；结果连链首都被压了 58 秒。
+                // 叠上后台 tick 的 60 秒下限，用户看到的那条最坏旧 118 秒 ——
+                // 走路 1.5–2 步/秒，就是 150–200 步的误差，而目标才 200 步。
+                // 用户说的「三分钟一次，隔两轮才准」，量出来的就是这个数。
+                //
+                // 只刷链首两条，成本与刷 62 条相比可以忽略，所以链首变了立刻换。
                 if wantBodies == chainBodies { return false }
-                if now.timeIntervalSince(lastBodyRefreshAt) < 58 { return false }
+                if now.timeIntervalSince(lastBodyRefreshAt) < 58 {
+                    let head = Swift.min(2, wantBodies.count)
+                    let headChanged = head > 0
+                        && zip(wantBodies.prefix(head), chainBodies.prefix(head))
+                            .contains { $0.0 != $0.1 }
+                    if !headChanged { return false }
+                }
             }
         }
 
@@ -210,26 +230,40 @@ final class NotificationPlanner {
         }
         lastDeliveredAt = now
 
-        // 撤掉「已经弹出来」的所有我方通知，不只是 baseID。
+        // **先加，后撤。** 顺序反了就是「有震动、没弹窗」。
         //
-        // 这是用户报的「走满 200 步先弹一条还差 N 步、紧接着又弹已满 200 步」
-        // 的全部根源：预排链用的是 ws.nudge.c0 / c1 / …，而这里原来只撤
-        // ws.nudge 自己。于是那条按 deadline 到点响的「还差 N 步」留在手表上，
-        // 「已满 200 步」紧跟着又弹一条，两条并排卡在通知中心。
+        // 原来是先 removeDeliveredNotifications 撤掉全部我方 id、再 add。
+        // 于是走成这样：链上那条「还差 N 步」刚被系统投递（震动已经发生了）
+        // → App 醒 → 判定走够 → 先撤一遍（clearDeliveredNotificationCenter 一次、
+        // 这里再一次）→ **横幅被收走** → 而 add(trigger: nil) 是即时投递，
+        // 要求进程还活着，赶上正要挂起就不生效 → 手腕上只剩一下震，屏幕空的。
+        // 等下次 App 醒才补上一条「已满」—— 用户说的「隔一会儿通知才发过来」。
         //
-        // 撤的是 delivered（已经响过的），pending 那条链不动 —— 上一段注释
-        // 里说的"别把链一起撤掉"依然成立，这里只清理已经落地的那几条。
-        var stale = [Self.baseID, Self.relayID]
-        for i in 0..<Self.maxSlots { stale.append(Self.chainID(i)) }
-        center.removeDeliveredNotifications(withIdentifiers: stale)
-
+        // 这条规矩项目自己在 replaceChain 里立过：先加后删，任何一刻系统里都
+        // 有通知排着。fireNow 一直没遵守。
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
 
         let request = UNNotificationRequest(identifier: Self.baseID, content: content, trigger: nil)
-        center.add(request, withCompletionHandler: nil)
+        center.add(request) { error in
+            if let error = error {
+                DispatchQueue.main.async {
+                    self.lastFireError = error.localizedDescription
+                }
+                // 加失败了就**不要撤**：旧的那条还留在屏幕上，比空无一物强。
+                return
+            }
+            // 撤的是 delivered（已经响过的），pending 那条链不动。
+            // baseID 必须排除 —— trigger: nil 是立即投递，撤自己等于刚弹就收走。
+            var stale = [Self.relayID]
+            for i in 0..<Self.maxSlots { stale.append(Self.chainID(i)) }
+            DispatchQueue.main.async {
+                self.lastFireError = nil
+                self.center.removeDeliveredNotifications(withIdentifiers: stale)
+            }
+        }
         return true
     }
 

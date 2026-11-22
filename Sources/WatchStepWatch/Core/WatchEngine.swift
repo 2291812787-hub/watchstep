@@ -355,6 +355,41 @@ final class WatchEngine: ObservableObject {
         // 「充电中，暂停」，留一个上一轮的旧值会显示成「正常」——那是骗人。
         quiet = RuleEngine.quietReason(now: now, config: cfg, surroundings: env)
 
+        // ---- 充电 / 摘下 = 等价于「按了暂停」，锚点跟着现在走 ----
+        //
+        // 用户的原话：「充电其实很简单，你只要识别到在充电了，就直接在系统里
+        // 给它按暂停不就好了。」
+        //
+        // 暂停的语义是「这段时间不算数」：拔线之后要拿到一个**完整的新窗口**，
+        // 而不是「已超时 2 小时」迎头一棒。锚点就是唯一的状态，所以推进它。
+        //
+        // 必须无条件推（不是超时了才推）：充电两小时期间 App 就算偶尔醒一次，
+        // 若只推一次，锚点会停在「上一次醒的那一刻」，拔线时最坏还是落后 30 分钟。
+        //
+        // 同时把判定用的步数归零：充电前攒的那些步数属于上一段，不该在这里
+        // 触发「已满 200 步 → 归零 → 发一条达成通知」。人不在走，发达成通知是噪音。
+        //
+        // 低电量**不在**此列：它只是「省电」的理由，不是「别提醒」，更不能把
+        // 锚点推走（否则走够了也不归零，会一直卡在同一轮）。
+        var effAnchor = anchor
+        var effSteps = steps
+        if let q = quiet, q == .charging || q == .offWrist {
+            effAnchor = now
+            effSteps = 0
+            if abs(AnchorStore.shared.anchor.timeIntervalSince(now)) > 1 {
+                let jump = now.timeIntervalSince(AnchorStore.shared.anchor)
+                AnchorStore.shared.anchor = now
+                // 只在跳得远的时候记一条审计（充电开始时那种「推了两小时」值得留痕）；
+                // 每 60 秒的常规推进不记，否则会把审计刷满，真有事时反而看不见。
+                if jump > 300 {
+                    AnchorStore.shared.noteChain(
+                        "\(q == .charging ? "充电" : "摘下")中，按暂停：锚点推到现在"
+                    )
+                }
+            }
+            stepsInWindow = 0
+        }
+
         // ---- 先认账：挂起期间链上过点的槽位可能已经真弹过了 ----
         //
         // 必须在步数 guard **之前**。以前认账放在 .nudge / .satisfied 两个分支里，
@@ -376,8 +411,8 @@ final class WatchEngine: ObservableObject {
             return
         }
 
-        stepsInWindow = steps
-        let decision = RuleEngine.decide(anchor: anchor, steps: steps, now: now, config: cfg)
+        stepsInWindow = effSteps ?? 0
+        let decision = RuleEngine.decide(anchor: effAnchor, steps: effSteps, now: now, config: cfg)
         lastDecision = decision
 
         switch decision {
@@ -407,10 +442,13 @@ final class WatchEngine: ObservableObject {
             // 达成**每次都告诉用户**。以前只在「正在催」或「刚被催过」时才发，
             // 于是走够的那一刻屏幕上一片安静，只有一次很容易被忽略的轻震 ——
             // 用户只记得「还在差 200」，得点进来才看到早就满了。这是另一半根因。
-            // 先清掉通知中心里已经弹出来的那些 —— 预排链那条「还差 N 步」
-            // 就在里面。fireNow 内部也会清，这里显式做一次是因为它可能被
-            // minGap 挡掉，挡掉之后旧条不该还挂在那儿。
-            NotificationPlanner.shared.clearDeliveredNotificationCenter()
+            //
+            // **不再在这里提前 clearDeliveredNotificationCenter()。**
+            // 那句是「先撤后加」的一半，会让屏幕空一段时间；而 fireNow 内部
+            // 现在是「先加后撤」（add 的 completion 成功后才撤旧的），
+            // 外面再撤一次反而把「先加后撤」这个保证拆掉了。
+            // 至于"fireNow 被 minGap 挡掉时旧条还挂着"—— 挂着比空着好：
+            // 屏幕上始终有一条我方的通知，用户不会以为提醒停了。
 
             // 25 秒内刚被催过，就只更新界面、不再弹第二条。
             //
@@ -426,7 +464,7 @@ final class WatchEngine: ObservableObject {
             } ?? false
             if !(justNudged && !isBackgroundNow()) {
                 NotificationPlanner.shared.fireNow(
-                    body: "已满 \(cfg.targetSteps) 步 · 本轮 \(Int(now.timeIntervalSince(anchor) / 60)) 分钟，重新开始计时",
+                    body: "已满 \(cfg.targetSteps) 步 · 本轮 \(Int(now.timeIntervalSince(effAnchor) / 60)) 分钟，重新开始计时",
                     title: "走够了",
                     now: now
                 )
@@ -564,13 +602,21 @@ final class WatchEngine: ObservableObject {
     /// 都可能拿到失败或旧值。一旦在这里把链撤空，而 App 随即被系统挂起，
     /// 就再没有任何东西能把它排回来 —— 用户看到的正是「响过一两声就彻底安静」。
     /// 宁可多响，不可哑掉。
-    private func clearChain(_ why: String, now: Date) {
+    private func clearChain(_ why: String, now: Date, allowBackground: Bool = false) {
         // 接力**无论前后台都要撤**。这跟精确链的规则相反，理由也相反：
         // 精确链最多 60 条，会自己耗尽，后台误判的代价有限，所以宁可留着；
         // 接力不会耗尽，误判一次就是整夜每分钟响 —— 那边必须宁可少响。
         NotificationPlanner.shared.disarmRelay()
 
-        if isBackgroundNow() {
+        // 后台默认不撤，因为「一撤空就再没人排回来」。
+        //
+        // 但充电 / 摘下是例外，而且必须是例外：用户明确要求「充电就当按了暂停，
+        // 别提醒」，那链就必须真的撤掉，否则人不在手边它照样到点震。
+        // 这一条之所以现在敢放开，是因为同时做了两件事兜住它：
+        //   ① 充电期间常驻会话不关（见上面 holdForPower），拔线 ≤60 秒就能补；
+        //   ② 下面 early return 的死路已修，任何一次 tick 都排得出链。
+        // 少了任何一件，这里放开就等于制造「链空且永远空」。
+        if isBackgroundNow() && !allowBackground {
             AnchorStore.shared.noteChain("≈ 后台想撤(\(why))，拒绝，链保持")
             return
         }
@@ -583,8 +629,18 @@ final class WatchEngine: ObservableObject {
         // 会话开关必须先算：下面每一条都是 early return，
         // 放在函数末尾就会被跳过 —— 一插上充电器那次 tick 正好命中第一个 guard，
         // 会话没释放，人却在充电，白耗电。
+        //
+        // **但充电时故意保持会话。** 这是「充电=暂停」能成立的前提：
+        // 暂停容易，解除暂停难 —— watchOS 不会因为你拔掉线就唤醒 App。
+        // 插上电就把会话关掉，App 立刻睡死，两小时后拔线没有任何东西知道，
+        // 链一直是空的，正是用户报的那个「戴回手腕再也不响」。
+        //
+        // 而充电恰恰是全天最不缺电的工况（电池在往里灌），
+        // 拿它来「守着暂停结束」几乎是免费的。手表的 batteryState 一变，
+        // 下一轮 tick（≤60 秒）就能发现，立刻解除暂停、重排链。
+        let holdForPower = (quiet == .charging || quiet == .offWrist)
         ExtendedSessionManager.shared.setDesired(
-            cfg.enabled && cfg.isActive(at: now) && quiet == nil
+            cfg.enabled && cfg.isActive(at: now) && (quiet == nil || holdForPower)
         )
 
         // 充电 / 摘下时预排通知必须撤掉 —— 人不在状态上，弹了就是骚扰。
@@ -595,7 +651,9 @@ final class WatchEngine: ObservableObject {
         // 所以低电量只停常驻会话（省电的地方），兜底的那条通知留着。
         let q = RuleEngine.quietReason(now: now, config: cfg, surroundings: surroundings)
         if let q = q, q != .lowBattery {
-            clearChain("安静:\(q)", now: now)
+            // 充电 / 摘下要**连后台一起撤**：人不在手边，链留着就是到点白震。
+            clearChain("安静:\(q)", now: now,
+                       allowBackground: (q == .charging || q == .offWrist))
             return
         }
 
@@ -680,7 +738,14 @@ final class WatchEngine: ObservableObject {
         let lastNudge = AnchorStore.shared.lastNudgeAt
 
         var fires: [Date] = []
-        var t = deadline
+        // 起点不能早于现在。
+        //
+        // deadline 早于 now（已经逾期）时，t 若从 deadline 起算，整条循环
+        // 62 个候选点全是过去的时刻，全被 `timeIntervalSince(now) >= -2` 跳过
+        // → fires 为空。以前靠兜底勉强排 1 条，而兜底在逾期超过 5 小时时也排不出来
+        // （见下面那段注释），于是链永久为空。
+        // 逾期时从 now 起算，第一个点就是「现在」，立刻催一次 —— 本来就是逾期了。
+        var t = Swift.max(deadline, now)
         // 只由 maxSlots 决定链有多长，不再另设"从现在起 24 分钟内"的截断。
         // 那个截断和旧的 maxSlots = 24 配套，改大之后忘了同步，于是设 30 分钟窗口时
         // first（30 分钟后）已经落在截断之外 → fires 为空 → 兜底成「只排 1 条」，
@@ -711,14 +776,26 @@ final class WatchEngine: ObservableObject {
             // 而它一旦响过就被认账吃掉，下一轮又生出一个新的 5 秒后 ——
             // 结果就是用户说的「步数一变动，马上又发一条」，每轮都发。
             // 用网格点则天然幂等：同一时刻反复算，算出来的还是同一条。
-            var k = 0.0
-            while k < Double(NotificationPlanner.maxSlots) {
+            //
+            // **而且 k 必须从「不早于现在的第一个网格点」开始。**
+            // 原来是 `deadline + k*step`、k 从 0 数到 maxSlots：
+            // 逾期超过 maxSlots × step（60 × 5 分钟 = 5 小时）时，
+            // 所有候选点全在过去 → fires 仍然为空 → 打一行「兜底也落在时段外，不排」
+            // 然后 return。**链就此永久为空。**
+            // 这正是用户报的：「充了两小时电 / 睡了一夜，戴回手腕再也不响，
+            // 进 App 看预排是空的，只有点『本轮立即归零』才活。」
+            // 充电两小时 + 睡八小时，逾期远远超过 5 小时，一击必中。
+            let behind = now.timeIntervalSince(deadline)
+            var k = behind > 1 ? (behind / step).rounded(.up) : 0
+            var tries = 0.0
+            while tries < Double(NotificationPlanner.maxSlots) {
                 let cand = deadline.addingTimeInterval(k * step)
                 if cand.timeIntervalSince(now) > 1, cfg.isActive(at: cand) {
                     fires = [cand]
                     break
                 }
                 k += 1
+                tries += 1
             }
             if fires.isEmpty {
                 AnchorStore.shared.noteChain("兜底也落在时段外，不排")

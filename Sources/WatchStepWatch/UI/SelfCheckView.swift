@@ -85,6 +85,12 @@ struct SelfCheckView: View {
                     .foregroundStyle(engine.notificationAuth == "已允许" ? .green : .red)
                     .fixedSize(horizontal: false, vertical: true)
 
+                Text("预排：\(engine.pendingNotifications) 条" +
+                     (NotificationPlanner.shared.lastFireError.map { "\n最近一次没排进去：\($0)" } ?? ""))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(engine.pendingNotifications > 0 ? .green : .orange)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 Button("重新请求通知授权") { engine.requestNotificationAuth() }
                     .font(.system(size: 11))
                     .foregroundStyle(.yellow)
