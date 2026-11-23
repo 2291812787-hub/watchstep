@@ -1,0 +1,53 @@
+job=ipa
+status=success
+sha=8f0979367d1a97e880d5843a43ef9aa8e7fbbe17
+run_id=45204276168
+time=2026-11-23T15:22:35Z
+ipa_bytes=457389
+
+======== 所有 error 行 ========
+（以上为全部）
+
+======== 编译日志末尾 ========
+GenerateDSYMFile /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app.dSYM /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app/WatchStep (in target 'WatchStep' from project 'WatchStep')
+    cd /Users/runner/work/watchstep/watchstep
+    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/dsymutil /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app/WatchStep -o /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app.dSYM
+
+AppIntentsSSUTraining (in target 'WatchStep' from project 'WatchStep')
+    cd /Users/runner/work/watchstep/watchstep
+    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsnltrainingprocessor --infoplist-path /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app/Info.plist --temp-dir-path /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Intermediates.noindex/WatchStep.build/Release-iphoneos/WatchStep.build/ssu --bundle-id top.webchangming.step --product-path /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app --extracted-metadata-path /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app/Metadata.appintents --metadata-file-list /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Intermediates.noindex/WatchStep.build/Release-iphoneos/WatchStep.build/WatchStep.DependencyMetadataFileList --source-file /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app/Info.plist --archive-ssu-assets
+2026-11-23 15:22:08.200 appintentsnltrainingprocessor[2454:10567] Parsing options for appintentsnltrainingprocessor
+2026-11-23 15:22:08.201 appintentsnltrainingprocessor[2454:10567] Starting AppIntents SSU YAML Generation
+2026-11-23 15:22:08.206 appintentsnltrainingprocessor[2454:10567] No AppShortcuts found - Skipping.
+
+RegisterExecutionPolicyException /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app (in target 'WatchStep' from project 'WatchStep')
+    cd /Users/runner/work/watchstep/watchstep
+    builtin-RegisterExecutionPolicyException /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app
+
+Validate /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app (in target 'WatchStep' from project 'WatchStep')
+    cd /Users/runner/work/watchstep/watchstep
+    builtin-validationUtility /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app -shallow-bundle -infoplist-subpath Info.plist
+
+Touch /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app (in target 'WatchStep' from project 'WatchStep')
+    cd /Users/runner/work/watchstep/watchstep
+    /usr/bin/touch -c /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Products/Release-iphoneos/WatchStep.app
+
+** BUILD SUCCEEDED **
+
+
+======== 打包日志末尾 ========
+
+RegisterExecutionPolicyException /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Intermediates.noindex/ArchiveIntermediates/WatchStep/InstallationBuildProductsLocation/Applications/WatchStep.app (in target 'WatchStep' from project 'WatchStep')
+    cd /Users/runner/work/watchstep/watchstep
+    builtin-RegisterExecutionPolicyException /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Intermediates.noindex/ArchiveIntermediates/WatchStep/InstallationBuildProductsLocation/Applications/WatchStep.app
+
+Validate /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Intermediates.noindex/ArchiveIntermediates/WatchStep/InstallationBuildProductsLocation/Applications/WatchStep.app (in target 'WatchStep' from project 'WatchStep')
+    cd /Users/runner/work/watchstep/watchstep
+    builtin-validationUtility /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Intermediates.noindex/ArchiveIntermediates/WatchStep/InstallationBuildProductsLocation/Applications/WatchStep.app -shallow-bundle -infoplist-subpath Info.plist
+
+Touch /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Intermediates.noindex/ArchiveIntermediates/WatchStep/InstallationBuildProductsLocation/Applications/WatchStep.app (in target 'WatchStep' from project 'WatchStep')
+    cd /Users/runner/work/watchstep/watchstep
+    /usr/bin/touch -c /Users/runner/Library/Developer/Xcode/DerivedData/WatchStep-dmzxtrymevaocgcsnuppyrhznfqp/Build/Intermediates.noindex/ArchiveIntermediates/WatchStep/InstallationBuildProductsLocation/Applications/WatchStep.app
+
+** ARCHIVE SUCCEEDED **
+
