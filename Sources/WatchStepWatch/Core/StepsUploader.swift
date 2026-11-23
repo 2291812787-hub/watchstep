@@ -48,16 +48,25 @@ final class StepsUploader {
     private let kSlotTries = "upload.slotTries"
 
     private let defaults = UserDefaults.standard
-    private var inFlight = false
+
+    /// 查步数用的锁。**必须和"发请求"的锁分开。**
+    /// 4.15–4.17 曾把两者共用一个 inFlight：tickIfNeeded 先把它置真去查
+    /// CMPedometer，回调里 post()→flush() 一进门就撞上这把锁直接 return，
+    /// 于是**每一次自动上传都被自己挡住**，只有自检页那个会把锁清掉的
+    /// "强制重连"发得出去。用户看到的"全靠手动"就是这么来的。
+    private var querying = false
+    private var queryingAt: Date?
+
+    /// 发上传请求用的锁。
+    private var sending = false
+    private var sendingAt: Date?
+    /// 上一次尝试发送的时刻，用来给队列重试留最小间隔（防止每个 tick 都猛发一轮）。
+    private var lastFlushAt: Date?
 
     /// 路径刚变为可用时置真，让下一次 tickIfNeeded 跳过退避直接发。
     /// 用户说的「忽然就能连了」，那一下必须立刻抓住，不能被 60 秒退避挡掉。
     private var forceNext = false
 
-    /// 起飞时刻。请求挂住时（watchOS 随时可能把进程冻住，回调永远不来）
-    /// inFlight 会永远是 true，于是之后每次 tick 都在闸门前 return，再也不重试。
-    /// 超过 45 秒一律当作已经失败。
-    private var inFlightAt: Date?
     private let pedometer = CMPedometer()
 
     private static let dayFmt: DateFormatter = {
@@ -77,15 +86,23 @@ final class StepsUploader {
     // MARK: - tick 入口
 
     func tickIfNeeded(now: Date) {
+        // ---- 第一件事：把积压的传出去 ----
+        //
+        // 这一步和"当前是哪个时点"完全无关。队列里有东西就该发，
+        // 不管今天还剩几个点、也不管这个点是不是已经发过了。
+        // 4.15–4.17 没有这一步，队列只能靠 flush 链自己传下去，
+        // 而链的入口被自己挡住 —— 于是队列只进不出。
+        flush()
+
         guard CMPedometer.isStepCountingAvailable() else { return }
         guard let slot = latestPassedSlot(now: now) else { return }
 
         let key = "\(Self.dayFmt.string(from: now))#\(slot)"
         if defaults.string(forKey: kLastSent) == key { return }
-        if inFlight {
-            if let t = inFlightAt, now.timeIntervalSince(t) < 120 { return }
-            // 挂太久了，当它已经死了
-            inFlight = false
+        if querying {
+            if let t = queryingAt, now.timeIntervalSince(t) < 120 { return }
+            // 查步数的回调没来（进程被冻住是常态），当它已经死了
+            querying = false
         }
 
         // 同一个点失败后退避。
@@ -104,8 +121,8 @@ final class StepsUploader {
         }
         forceNext = false
 
-        inFlight = true
-        inFlightAt = now
+        querying = true
+        queryingAt = now
         if defaults.string(forKey: kLastSlotAttempt) != key {
             // 换了一个时点，计数重来
             defaults.set(0, forKey: kSlotTries)
@@ -117,6 +134,9 @@ final class StepsUploader {
         let start = Calendar.current.startOfDay(for: now)
         pedometer.queryPedometerData(from: start, to: now) { [weak self] data, error in
             guard let self = self else { return }
+            // 回调有没有来都要把锁放开，否则下一轮永远进不来
+            self.querying = false
+            self.queryingAt = nil
             let steps = data?.numberOfSteps.intValue ?? -1
             var note = ""
             if let error = error {
@@ -207,18 +227,24 @@ final class StepsUploader {
     ///     实测重连 15 次全被系统回同一个 unsatisfied）
     ///   · 还不行就留在盘里，等路径变可用的那一刻自己补
     func flush() {
-        if inFlight {
-            if let t = inFlightAt, Date().timeIntervalSince(t) < 120 { return }
-            inFlight = false
+        if sending {
+            if let t = sendingAt, Date().timeIntervalSince(t) < 60 { return }
+            // 请求挂住了（进程被冻住的常态），当它已经死了
+            sending = false
         }
+        // 队列重试的最小间隔。tick 是 60 秒一次，这里放 20 秒，
+        // 既能每个 tick 都试一次，又不会同一个 tick 内被多处调用重复发。
+        if let t = lastFlushAt, Date().timeIntervalSince(t) < 20 { return }
+
         var a = loadPending()
         guard !a.isEmpty else { return }
 
         let item = a.removeFirst()
         savePending(a)
 
-        inFlight = true
-        inFlightAt = Date()
+        sending = true
+        sendingAt = Date()
+        lastFlushAt = Date()
 
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
@@ -231,7 +257,11 @@ final class StepsUploader {
             "date": item.date,
             "slot": item.slot,
             "device": "watch",
-            "sent_at": item.sentAt,
+            // collected = 这条数据是什么时候采的；sent_at = 真正发出去的时刻。
+            // 分开记才能看出「采集到送达」到底压了多久 —— 以前只记 tick 时刻，
+            // 日志里看像是"刚采就发"，其实是几个小时后才传出去。
+            "collected": item.sentAt,
+            "sent_at": ISO8601DateFormatter().string(from: Date()),
             // 补发标记：服务端日志里一眼能看出这条是离线攒下来的
             "queued": a.count,
         ]
@@ -241,9 +271,8 @@ final class StepsUploader {
 
         NetGateway.shared.fetch(req, lane: .upload, delays: [0, 2, 6]) { [weak self] data, resp, err in
             guard let self = self else { return }
-            self.inFlight = false
-            self.inFlightAt = nil
-            let code = resp?.statusCode ?? 0
+            self.sending = false
+            self.sendingAt = nil            let code = resp?.statusCode ?? 0
             let stamp = Self.clock.string(from: Date())
 
             if let err = err {
@@ -271,15 +300,22 @@ final class StepsUploader {
                 self.defaults.set(item.steps, forKey: self.kLastSteps)
                 self.defaults.set("\(stamp) 成功 slot\(item.slot) \(item.steps)步 剩余\(self.pendingCount())条",
                                   forKey: self.kLastResult)
-                // 队列没清空就接着发
-                if self.pendingCount() > 0 { self.flush() }
+                // 队列没清空就接着发，且绕过最小间隔：
+                // 这一条刚发成功，说明通道是好的，剩下的应该立刻跟上。
+                if self.pendingCount() > 0 {
+                    self.lastFlushAt = nil
+                    self.flush()
+                }
             } else {
                 // 服务器明确回了非 2xx：这是服务器的答复，说明网络已通，
                 // 但这条本身被拒。留在队列里会永远卡住后面，直接丢弃并记录。
                 let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
                 self.defaults.set("\(stamp) HTTP\(code) slot\(item.slot) \(text.prefix(80))",
                                   forKey: self.kLastResult)
-                if self.pendingCount() > 0 { self.flush() }
+                if self.pendingCount() > 0 {
+                    self.lastFlushAt = nil
+                    self.flush()
+                }
             }
         }
     }
@@ -288,8 +324,9 @@ final class StepsUploader {
     func forceReconnect() {
         NetGateway.shared.rebuild(.upload)
         forceNext = true
-        inFlight = false
-        inFlightAt = nil
+        sending = false
+        sendingAt = nil
+        lastFlushAt = nil
         flush()
     }
 
