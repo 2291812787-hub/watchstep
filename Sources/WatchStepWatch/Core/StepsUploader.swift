@@ -272,7 +272,8 @@ final class StepsUploader {
         NetGateway.shared.fetch(req, lane: .upload, delays: [0, 2, 6]) { [weak self] data, resp, err in
             guard let self = self else { return }
             self.sending = false
-            self.sendingAt = nil            let code = resp?.statusCode ?? 0
+            self.sendingAt = nil
+            let code = resp?.statusCode ?? 0
             let stamp = Self.clock.string(from: Date())
 
             if let err = err {
